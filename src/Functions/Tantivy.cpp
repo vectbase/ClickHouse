@@ -34,7 +34,8 @@ public:
     }
 
     bool isDeterministic() const override { return false; }
-    bool isDeterministicInScopeOfQuery() const override { return false; }
+    bool isDeterministicInScopeOfQuery() const override { return true; }
+    bool isInjective(const ColumnsWithTypeAndName & /*sample_columns*/) const override { return true; }
     bool useDefaultImplementationForNulls() const override { return false; }
     bool isSuitableForConstantFolding() const override { return false; }
     bool isVariadic() const override { return true; }

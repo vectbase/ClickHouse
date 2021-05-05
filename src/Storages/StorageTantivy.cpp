@@ -42,12 +42,12 @@ public:
         const StorageMetadataPtr & metadata_snapshot,
         const String & tantivy_arg_,
         const UInt64 limit_,
-        TantivySearchIterWrapper *tantivy_iter_)
+        TantivySearchIndexRW *tantivy_index_)
         : SourceWithProgress(metadata_snapshot->getSampleBlockForColumns(column_names_, storage.getVirtuals(), storage.getStorageID()))
         , column_names(std::move(column_names_))
         , tantivy_arg(std::move(tantivy_arg_))
         , limit(limit_)
-        , tantivy_iter(tantivy_iter_)
+        , tantivy_index(tantivy_index_)
     {
     }
 
@@ -58,6 +58,8 @@ protected:
     {
         if (current_block_idx == 1)
             return {};
+
+        tantivy_iter = tantivysearch_search(tantivy_index, tantivy_arg.c_str(), limit);
 
         Columns columns;
         columns.reserve(column_names.size());
@@ -110,7 +112,8 @@ private:
     size_t current_block_idx = 0;
     const String tantivy_arg;
     UInt64 limit;
-    TantivySearchIterWrapper *tantivy_iter;
+    TantivySearchIndexRW *tantivy_index;
+    TantivySearchIterWrapper *tantivy_iter = nullptr;
 };
 
 class TantivyBlockOutputStream : public IBlockOutputStream
@@ -154,8 +157,7 @@ public:
                 auto & offsets = body_col->getOffsets();
                 const char * char_ptr = reinterpret_cast<const char*>(&chars[0]);
 
-                int res = tantivysearch_index(storage.tantivy_index, &processo_data[0], &movimento_data[0], char_ptr, &offsets[0], processo_data.size());
-                std::cerr << "index result: " << res << std::endl;
+                tantivysearch_index(storage.tantivy_index, &processo_data[0], &movimento_data[0], char_ptr, &offsets[0], processo_data.size());
             } else {
                 throw Exception(
                     "Inserts need all columns",
@@ -221,11 +223,9 @@ Pipe StorageTantivy::read(
 
     String tantivy_text_arg = function->arguments->children[0]->as<ASTLiteral &>().value.safeGet<String>();
 
-    TantivySearchIterWrapper *tantivy_iter = tantivysearch_search(tantivy_index, tantivy_text_arg.c_str(), limit);
-
     return Pipe(
             std::make_shared<TantivySource>(
-                    column_names, *this, metadata_snapshot, tantivy_text_arg, limit, tantivy_iter
+                    column_names, *this, metadata_snapshot, tantivy_text_arg, limit, tantivy_index
             ));
 }
 

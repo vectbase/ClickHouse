@@ -33,6 +33,8 @@ public:
     size_t getSize() const { return data.size(); }
 
     bool supportsPrewhere() const override { return true; }
+    bool supportsIndexForIn() const override { return true; }
+    bool mayBenefitFromIndexForIn(const ASTPtr & /* left_in_operand */, const Context & /* query_context */, const StorageMetadataPtr & /* metadata_snapshot */) const override { return true; }
 
     Pipe read(
         const Names & column_names,

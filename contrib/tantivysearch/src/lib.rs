@@ -13,6 +13,13 @@ use tantivy::schema::*;
 use tantivy::collector::{Collector, SegmentCollector};
 use tantivy::{Index, IndexReader, IndexWriter, SegmentReader, SegmentLocalId, DocId, Score, DocAddress, TantivyError};
 use tantivy::ReloadPolicy;
+use rayon::prelude::*;
+
+mod cache;
+
+static CACHE: once_cell::sync::Lazy<cache::ConcurrentCache<(String, u64), Vec<(u64, u64)>>> = once_cell::sync::Lazy::new(|| {
+    cache::ConcurrentCache::with_capacity(100, 60, 110)
+});
 
 #[derive(Default)]
 pub struct Docs {
@@ -39,7 +46,7 @@ impl Collector for Docs {
     }
 
     fn requires_scoring(&self) -> bool {
-        true
+        false
     }
 
     fn merge_fruits(&self, segment_docs: Vec<Vec<(Score, DocAddress)>>) -> tantivy::Result<Vec<(Score, DocAddress)>> {
@@ -53,7 +60,7 @@ impl Collector for Docs {
             }
         }).unwrap_or_else(|| vec!());
 
-        all.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        // all.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
 
         if all.len() > self.limit as usize {
             all.resize(self.limit as usize, (0.0f32, DocAddress(0, 0)));
@@ -203,6 +210,50 @@ pub extern "C" fn tantivysearch_open_or_create_index(dir_ptr: *const c_char) -> 
     Box::into_raw(Box::new(IndexRW { index, reader, writer, path: dir_str.to_string() }))
 }
 
+// #[cached(
+//     size=100,
+//     time=3600,
+//     key = "(String, u64)",
+//     convert = r#"{ (query_str.to_string(), limit) }"#
+// )]
+pub fn tantivysearch_search_impl(irw: *mut IndexRW, query_str: &str, limit: u64) -> Vec<(u64, u64)> {
+    CACHE.resolve((query_str.to_string(), limit), move || {
+        println!("Searching index for {}", query_str);
+
+        let schema = unsafe { (*irw).index.schema() };
+
+        let body = schema.get_field("body").expect("missing field body");
+        let proc_id = schema.get_field("proc_id").expect("missing field proc_id");
+        let mov_id = schema.get_field("mov_id").expect("missing field mov_id");
+
+        let searcher = unsafe { (*irw).reader.searcher() };
+        let segment_readers = searcher.segment_readers();
+        let ff_readers_proc: Vec<_> = segment_readers.iter().map(|seg_r| {
+            let ffs = seg_r.fast_fields();
+            ffs.u64(proc_id).unwrap()
+        }).collect();
+        let ff_readers_mov: Vec<_> = segment_readers.iter().map(|seg_r| {
+            let ffs = seg_r.fast_fields();
+            ffs.u64(mov_id).unwrap()
+        }).collect();
+
+
+        let query_parser = QueryParser::for_index(unsafe { &(*irw).index }, vec![body]);
+
+        let query = query_parser.parse_query(query_str).expect("failed to parse query");
+        let docs = searcher.search(&query, &Docs::with_limit(limit)).expect("failed to search");
+        let mut results: Vec<_> = docs.into_par_iter().map(|(_score, doc_address)| {
+            let ff_reader_proc = &ff_readers_proc[doc_address.segment_ord() as usize];
+            let ff_reader_mov = &ff_readers_mov[doc_address.segment_ord() as usize];
+            let proc_id: u64 = ff_reader_proc.get(doc_address.doc());
+            let mov_id: u64 = ff_reader_mov.get(doc_address.doc());
+            (proc_id, mov_id)
+        }).collect();
+
+        results
+    })
+}
+
 #[no_mangle]
 pub extern "C" fn tantivysearch_search(irw: *mut IndexRW, query_ptr: *const c_char, limit: u64) -> *mut IterWrapper {
     assert!(!irw.is_null());
@@ -215,43 +266,13 @@ pub extern "C" fn tantivysearch_search(irw: *mut IndexRW, query_ptr: *const c_ch
 
     let query_str = query_c_str.to_str().expect("failed to get &str from cstr");
 
-    println!("Searching index for {}", query_str);
-
-    let schema = unsafe { (*irw).index.schema() };
-
-    let body = schema.get_field("body").expect("missing field body");
-    let proc_id = schema.get_field("proc_id").expect("missing field proc_id");
-    let mov_id = schema.get_field("mov_id").expect("missing field mov_id");
-
-    let searcher = unsafe { (*irw).reader.searcher() };
-    let segment_readers = searcher.segment_readers();
-    let ff_readers_proc: Vec<_> = segment_readers.iter().map(|seg_r| {
-        let ffs = seg_r.fast_fields();
-        ffs.u64(proc_id).unwrap()
-    }).collect();
-    let ff_readers_mov: Vec<_> = segment_readers.iter().map(|seg_r| {
-        let ffs = seg_r.fast_fields();
-        ffs.u64(mov_id).unwrap()
-    }).collect();
-
-
-    let query_parser = QueryParser::for_index(unsafe { &(*irw).index }, vec![body]);
-
-    let query = query_parser.parse_query(query_str).expect("failed to parse query");
-    let docs = searcher.search(&query, &Docs::with_limit(limit)).expect("failed to search");
-    let mut results = vec!();
-    for (_score, doc_address) in docs {
-        let ff_reader_proc = &ff_readers_proc[doc_address.segment_ord() as usize];
-        let ff_reader_mov = &ff_readers_mov[doc_address.segment_ord() as usize];
-        let proc_id: u64 = ff_reader_proc.get(doc_address.doc());
-        let mov_id: u64 = ff_reader_mov.get(doc_address.doc());
-        results.push((proc_id, mov_id));
-    }
+    let results = tantivysearch_search_impl(irw, query_str, limit);
 
     println!("Search results: {}", results.len());
 
     Box::into_raw(Box::new(results.into_iter().into()))
 }
+
 #[no_mangle]
 pub extern "C" fn tantivysearch_index(irw: *mut IndexRW, proc_ids: *const u64, mov_ids: *const u64, chars: *const c_char, offsets: *const u64, size: size_t) -> c_uchar {
     assert!(!irw.is_null());
