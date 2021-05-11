@@ -89,7 +89,9 @@ where
 
         if let Some(val_ref) = pinned.get(&key) {
             if val_ref.0.elapsed().as_secs() <= self.seconds {
-                return val_ref.1.get_or_init(init).clone()
+                let result_ref = val_ref.1.get_or_init(init);
+                let result = result_ref.clone();
+                return result;
             }
         }
 

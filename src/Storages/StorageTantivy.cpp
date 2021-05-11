@@ -42,11 +42,13 @@ public:
         const StorageMetadataPtr & metadata_snapshot,
         const String & tantivy_arg_,
         const UInt64 limit_,
+        const bool ranked_,
         TantivySearchIndexRW *tantivy_index_)
         : SourceWithProgress(metadata_snapshot->getSampleBlockForColumns(column_names_, storage.getVirtuals(), storage.getStorageID()))
         , column_names(std::move(column_names_))
         , tantivy_arg(std::move(tantivy_arg_))
         , limit(limit_)
+        , ranked(ranked_)
         , tantivy_index(tantivy_index_)
     {
     }
@@ -56,62 +58,84 @@ public:
 protected:
     Chunk generate() override
     {
-        if (current_block_idx == 1)
+	if (current_stage == 0) {
+            if (ranked) {
+                tantivy_iter = tantivysearch_ranked_search(tantivy_index, tantivy_arg.c_str(), limit);
+            } else {
+                tantivy_iter = tantivysearch_search(tantivy_index, tantivy_arg.c_str(), limit);
+            }
+	    current_stage = 1;
+	} else if (current_stage == 2) {
             return {};
+	}
 
-        tantivy_iter = tantivysearch_search(tantivy_index, tantivy_arg.c_str(), limit);
+        size_t iter_size = tantivysearch_iter_count(tantivy_iter);
+	size_t block_size = std::min(iter_size, 65536UL);
 
         Columns columns;
         columns.reserve(column_names.size());
 
-        auto column_proc = ColumnUInt64::create();
-        auto & data_proc = column_proc->getData();
+	if (column_names.size() == 1) {
+	    if (column_names[0] == "processo_id") {
+                auto column_proc = ColumnUInt64::create();
+                auto & data_proc = column_proc->getData();
+                data_proc.resize(block_size);
+                size_t written_size = tantivysearch_iter_batch(tantivy_iter, block_size, &data_proc[0], nullptr);
 
-        auto column_mov = ColumnUInt64::create();
-        auto & data_mov = column_mov->getData();
-
-        size_t tantivy_size = tantivysearch_iter_count(tantivy_iter);
-        if (tantivy_size < limit)
-            limit = tantivy_size;
-        data_proc.resize(limit);
-        data_mov.resize(limit);
-
-        UInt64 i = 0;
-        UInt64 proc_id = 0;
-        UInt64 mov_id = 0;
-        int r = tantivysearch_iter_next(tantivy_iter, &proc_id, &mov_id);
-        while (r)
-        {
-            data_proc[i] = proc_id;
-            data_mov[i] = mov_id;
-            if (i > limit)
-                break;
-            i++;
-            r = tantivysearch_iter_next(tantivy_iter, &proc_id, &mov_id);
-        }
-        tantivysearch_iter_free(tantivy_iter);
-
-        for (size_t c=0; c<column_names.size(); c++)
-        {
-            if (column_names[c]=="processo_id")
                 columns.push_back(std::move(column_proc));
-            else if (column_names[c]=="movimento_id")
-                columns.push_back(std::move(column_mov));
-            else
+		if (written_size == iter_size) {
+                    tantivysearch_iter_free(tantivy_iter);
+                    current_stage = 2;
+		}
+	    } else {
+                tantivysearch_iter_free(tantivy_iter);
                 throw Exception(
-                    "Selecting colum "+column_names[c]+" is not supported",
+                    "Selecting processo_id column is required",
                     ErrorCodes::NOT_IMPLEMENTED);
-        }
-        current_block_idx = 1;
-        UInt64 num_rows = columns.at(0)->size();
-        return Chunk(std::move(columns), num_rows);
+	    }
+	} else {
+            auto column_proc = ColumnUInt64::create();
+            auto & data_proc = column_proc->getData();
+
+            auto column_mov = ColumnUInt64::create();
+            auto & data_mov = column_mov->getData();
+
+            data_proc.resize(block_size);
+            data_mov.resize(block_size);
+
+            size_t written_size = tantivysearch_iter_batch(tantivy_iter, block_size, &data_proc[0], &data_mov[0]);
+            // std::cerr << "written: " << written_size << std::endl;
+
+            for (size_t c=0; c<column_names.size(); c++)
+            {
+                if (column_names[c]=="processo_id") {
+                    columns.push_back(std::move(column_proc));
+	        } else if (column_names[c]=="movimento_id") {
+                    columns.push_back(std::move(column_mov));
+		} else {
+                    tantivysearch_iter_free(tantivy_iter);
+                    throw Exception(
+                        "Selecting colum "+column_names[c]+" is not supported",
+                        ErrorCodes::NOT_IMPLEMENTED);
+		}
+            }
+
+            if (written_size == iter_size) {
+                tantivysearch_iter_free(tantivy_iter);
+                current_stage = 2;
+            }
+	}
+
+         UInt64 num_rows = columns.at(0)->size();
+         return Chunk(std::move(columns), num_rows);
     }
 
 private:
     const Names column_names;
-    size_t current_block_idx = 0;
+    size_t current_stage = 0;
     const String tantivy_arg;
     UInt64 limit;
+    bool ranked;
     TantivySearchIndexRW *tantivy_index;
     TantivySearchIterWrapper *tantivy_iter = nullptr;
 };
@@ -212,20 +236,31 @@ Pipe StorageTantivy::read(
     }
 
     UInt64 limit = 1000000UL;
+    bool ranked = true;
 
-    if (function->arguments->children.size() == 2)
+    if (function->arguments->children.size() > 1)
     {
         if (function->arguments->children[1]->as<ASTLiteral>())
         {
                 limit = function->arguments->children[1]->as<ASTLiteral &>().value.safeGet<UInt64>();
         }
+
+        if (function->arguments->children.size() > 2)
+        {
+            if (function->arguments->children[2]->as<ASTLiteral>())
+            {
+                    ranked = !!function->arguments->children[2]->as<ASTLiteral &>().value.safeGet<UInt64>();
+            }
+        }
     }
+
+    std::cerr << "ranked: " << ranked << std::endl;
 
     String tantivy_text_arg = function->arguments->children[0]->as<ASTLiteral &>().value.safeGet<String>();
 
     return Pipe(
             std::make_shared<TantivySource>(
-                    column_names, *this, metadata_snapshot, tantivy_text_arg, limit, tantivy_index
+                    column_names, *this, metadata_snapshot, tantivy_text_arg, limit, ranked, tantivy_index
             ));
 }
 

@@ -59,9 +59,18 @@ public:
         {
             WhichDataType which2(arguments[1]);
 
-            if (arguments.size()>1 && !which2.isNativeUInt())
+            if (!which2.isNativeUInt())
                 throw Exception("Illegal type " + arguments[1]->getName() + " of argument of function " + getName() + ", expected UInt64",
                     ErrorCodes::ILLEGAL_TYPE_OF_ARGUMENT);
+
+            if (arguments.size() > 2)
+	    {
+                WhichDataType which3(arguments[2]);
+
+                if (!which3.isUInt8())
+                    throw Exception("Illegal type " + arguments[2]->getName() + " of argument of function " + getName() + ", expected UInt8",
+                        ErrorCodes::ILLEGAL_TYPE_OF_ARGUMENT);
+            }
         }
 
 
@@ -82,6 +91,13 @@ public:
             const IColumn * col2 = elem2.column.get();
             if (!isColumnConst(*col2))
                 throw Exception("The argument of function " + getName() + " must be constant.", ErrorCodes::ILLEGAL_COLUMN);
+            if (arguments.size()>2)
+            {
+                const ColumnWithTypeAndName & elem3 = arguments[2];
+                const IColumn * col3 = elem3.column.get();
+                if (!isColumnConst(*col3))
+                    throw Exception("The argument of function " + getName() + " must be constant.", ErrorCodes::ILLEGAL_COLUMN);
+            }
         }
 
 
