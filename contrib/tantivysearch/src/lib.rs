@@ -359,8 +359,8 @@ pub extern "C" fn tantivysearch_open_or_create_index(dir_ptr: *const c_char) -> 
                     println!("Creating index on {}", dir_str);
                     std::fs::create_dir_all(dir_str).expect("failed to create index dir");
                     let mut schema_builder = Schema::builder();
-                    schema_builder.add_u64_field("proc_id", FAST);
-                    schema_builder.add_u64_field("mov_id", FAST);
+                    schema_builder.add_u64_field("primary_id", FAST);
+                    schema_builder.add_u64_field("secondary_id", FAST);
                     schema_builder.add_text_field("body", TEXT);
                     let schema = schema_builder.build();
                     Index::create_in_dir(dir_str, schema).expect("failed to create index")
@@ -397,18 +397,18 @@ pub fn tantivysearch_search_impl(irw: *mut IndexRW, query_str: &str, limit: u64)
         let schema = unsafe { (*irw).index.schema() };
 
         let body = schema.get_field("body").expect("missing field body");
-        let proc_id = schema.get_field("proc_id").expect("missing field proc_id");
-        let mov_id = schema.get_field("mov_id").expect("missing field mov_id");
+        let primary_id = schema.get_field("primary_id").expect("missing field primary_id");
+        let secondary_id = schema.get_field("secondary_id").expect("missing field secondary_id");
 
         let searcher = unsafe { (*irw).reader.searcher() };
         let segment_readers = searcher.segment_readers();
-        let ff_readers_proc: Vec<_> = segment_readers.iter().map(|seg_r| {
+        let ff_readers_primary: Vec<_> = segment_readers.iter().map(|seg_r| {
             let ffs = seg_r.fast_fields();
-            ffs.u64(proc_id).unwrap()
+            ffs.u64(primary_id).unwrap()
         }).collect();
-        let ff_readers_mov: Vec<_> = segment_readers.iter().map(|seg_r| {
+        let ff_readers_secondary: Vec<_> = segment_readers.iter().map(|seg_r| {
             let ffs = seg_r.fast_fields();
-            ffs.u64(mov_id).unwrap()
+            ffs.u64(secondary_id).unwrap()
         }).collect();
 
 
@@ -417,11 +417,11 @@ pub fn tantivysearch_search_impl(irw: *mut IndexRW, query_str: &str, limit: u64)
         let query = query_parser.parse_query(query_str).expect("failed to parse query");
         let docs = searcher.search(&query, &Docs::with_limit(limit as usize)).expect("failed to search");
         let mut results: (Vec<_>, Vec<_>) = docs.into_par_iter().map(|(_score, doc_address)| {
-            let ff_reader_proc = &ff_readers_proc[doc_address.segment_ord() as usize];
-            let ff_reader_mov = &ff_readers_mov[doc_address.segment_ord() as usize];
-            let proc_id: u64 = ff_reader_proc.get(doc_address.doc());
-            let mov_id: u64 = ff_reader_mov.get(doc_address.doc());
-            (proc_id, mov_id)
+            let ff_reader_primary = &ff_readers_primary[doc_address.segment_ord() as usize];
+            let ff_reader_secondary = &ff_readers_secondary[doc_address.segment_ord() as usize];
+            let primary_id: u64 = ff_reader_primary.get(doc_address.doc());
+            let secondary_id: u64 = ff_reader_secondary.get(doc_address.doc());
+            (primary_id, secondary_id)
         }).unzip();
 
         dbg!(search.elapsed());
@@ -437,18 +437,18 @@ pub fn tantivysearch_ranked_search_impl(irw: *mut IndexRW, query_str: &str, limi
         let schema = unsafe { (*irw).index.schema() };
 
         let body = schema.get_field("body").expect("missing field body");
-        let proc_id = schema.get_field("proc_id").expect("missing field proc_id");
-        let mov_id = schema.get_field("mov_id").expect("missing field mov_id");
+        let primary_id = schema.get_field("primary_id").expect("missing field primary_id");
+        let secondary_id = schema.get_field("secondary_id").expect("missing field secondary_id");
 
         let searcher = unsafe { (*irw).reader.searcher() };
         let segment_readers = searcher.segment_readers();
-        let ff_readers_proc: Vec<_> = segment_readers.iter().map(|seg_r| {
+        let ff_readers_primary: Vec<_> = segment_readers.iter().map(|seg_r| {
             let ffs = seg_r.fast_fields();
-            ffs.u64(proc_id).unwrap()
+            ffs.u64(primary_id).unwrap()
         }).collect();
-        let ff_readers_mov: Vec<_> = segment_readers.iter().map(|seg_r| {
+        let ff_readers_secondary: Vec<_> = segment_readers.iter().map(|seg_r| {
             let ffs = seg_r.fast_fields();
-            ffs.u64(mov_id).unwrap()
+            ffs.u64(secondary_id).unwrap()
         }).collect();
 
 
@@ -457,11 +457,11 @@ pub fn tantivysearch_ranked_search_impl(irw: *mut IndexRW, query_str: &str, limi
         let query = query_parser.parse_query(query_str).expect("failed to parse query");
         let docs = searcher.search(&query, &RankedDocs::with_limit(limit as usize)).expect("failed to search");
         let mut results: (Vec<_>, Vec<_>) = docs.into_par_iter().map(|OrdDoc(_score, doc_address)| {
-            let ff_reader_proc = &ff_readers_proc[doc_address.segment_ord() as usize];
-            let ff_reader_mov = &ff_readers_mov[doc_address.segment_ord() as usize];
-            let proc_id: u64 = ff_reader_proc.get(doc_address.doc());
-            let mov_id: u64 = ff_reader_mov.get(doc_address.doc());
-            (proc_id, mov_id)
+            let ff_reader_primary = &ff_readers_primary[doc_address.segment_ord() as usize];
+            let ff_reader_secondary = &ff_readers_secondary[doc_address.segment_ord() as usize];
+            let primary_id: u64 = ff_reader_primary.get(doc_address.doc());
+            let secondary_id: u64 = ff_reader_secondary.get(doc_address.doc());
+            (primary_id, secondary_id)
         }).unzip();
 
         dbg!(search.elapsed());
@@ -508,17 +508,17 @@ pub extern "C" fn tantivysearch_ranked_search(irw: *mut IndexRW, query_ptr: *con
 }
 
 #[no_mangle]
-pub extern "C" fn tantivysearch_index(irw: *mut IndexRW, proc_ids: *const u64, mov_ids: *const u64, chars: *const c_char, offsets: *const u64, size: size_t) -> c_uchar {
+pub extern "C" fn tantivysearch_index(irw: *mut IndexRW, primary_ids: *const u64, secondary_ids: *const u64, chars: *const c_char, offsets: *const u64, size: size_t) -> c_uchar {
     assert!(!irw.is_null());
-    assert!(!proc_ids.is_null());
-    assert!(!mov_ids.is_null());
+    assert!(!primary_ids.is_null());
+    assert!(!secondary_ids.is_null());
     assert!(!offsets.is_null());
     assert!(!chars.is_null());
     if size == 0 {
         return 1;
     }
-    let proc_slice = unsafe { slice::from_raw_parts(proc_ids, size) };
-    let mov_slice = unsafe { slice::from_raw_parts(mov_ids, size) };
+    let primary_slice = unsafe { slice::from_raw_parts(primary_ids, size) };
+    let secondary_slice = unsafe { slice::from_raw_parts(secondary_ids, size) };
     let offsets_slice = unsafe { slice::from_raw_parts(offsets, size) };
     let chars_len: usize = (*offsets_slice.iter().last().unwrap()) as usize;
     let chars_slice = unsafe { slice::from_raw_parts(chars as *const u8, chars_len) };
@@ -533,13 +533,13 @@ pub extern "C" fn tantivysearch_index(irw: *mut IndexRW, proc_ids: *const u64, m
     let schema = unsafe { (*irw).index.schema() };
 
     let body = schema.get_field("body").expect("missing field body");
-    let proc_id = schema.get_field("proc_id").expect("missing field proc_id");
-    let mov_id = schema.get_field("mov_id").expect("missing field mov_id");
+    let primary_id = schema.get_field("primary_id").expect("missing field primary_id");
+    let secondary_id = schema.get_field("secondary_id").expect("missing field secondary_id");
 
     for i in 0..size {
         let mut doc = Document::default();
-        doc.add_u64(proc_id, proc_slice[i]);
-        doc.add_u64(mov_id, mov_slice[i]);
+        doc.add_u64(primary_id, primary_slice[i]);
+        doc.add_u64(secondary_id, secondary_slice[i]);
         doc.add_text(body, strs[i]);
         unsafe { (*irw).writer.add_document(doc) };
     }
@@ -580,13 +580,13 @@ pub extern "C" fn tantivysearch_index_truncate(irw: *mut IndexRW) -> c_uchar {
 }
 
 #[no_mangle]
-pub extern "C" fn tantivysearch_iter_next(iter_ptr: *mut IterWrapper, proc_id_ptr: *mut u64, mov_id_ptr: *mut u64) -> c_uchar {
+pub extern "C" fn tantivysearch_iter_next(iter_ptr: *mut IterWrapper, primary_id_ptr: *mut u64, secondary_id_ptr: *mut u64) -> c_uchar {
     assert!(!iter_ptr.is_null());
     match unsafe { (*iter_ptr).next() } {
-        Some((proc_id, mov_id)) => {
+        Some((primary_id, secondary_id)) => {
             unsafe {
-                *proc_id_ptr = proc_id;
-                *mov_id_ptr = mov_id;
+                *primary_id_ptr = primary_id;
+                *secondary_id_ptr = secondary_id;
             }
             1
         }
@@ -595,9 +595,9 @@ pub extern "C" fn tantivysearch_iter_next(iter_ptr: *mut IterWrapper, proc_id_pt
 }
 
 #[no_mangle]
-pub extern "C" fn tantivysearch_iter_batch(iter_ptr: *mut IterWrapper, count: u64, proc_ids_ptr: *mut u64, mov_ids_ptr: *mut u64) -> size_t {
+pub extern "C" fn tantivysearch_iter_batch(iter_ptr: *mut IterWrapper, count: u64, primary_ids_ptr: *mut u64, secondary_ids_ptr: *mut u64) -> size_t {
     assert!(!iter_ptr.is_null());
-    if proc_ids_ptr.is_null() {
+    if primary_ids_ptr.is_null() {
         return 0;
     }
 
@@ -606,13 +606,13 @@ pub extern "C" fn tantivysearch_iter_batch(iter_ptr: *mut IterWrapper, count: u6
 
     unsafe {
         let src_ptr = (*iter_ptr).inner.0.as_ptr().offset((*iter_ptr).offset as isize);
-        std::ptr::copy_nonoverlapping(src_ptr, proc_ids_ptr, n_to_write);
+        std::ptr::copy_nonoverlapping(src_ptr, primary_ids_ptr, n_to_write);
     }
 
-    if !mov_ids_ptr.is_null() {
+    if !secondary_ids_ptr.is_null() {
         unsafe {
             let src_ptr = (*iter_ptr).inner.1.as_ptr().offset((*iter_ptr).offset as isize);
-            std::ptr::copy_nonoverlapping(src_ptr, mov_ids_ptr, n_to_write);
+            std::ptr::copy_nonoverlapping(src_ptr, secondary_ids_ptr, n_to_write);
         }
     }
 

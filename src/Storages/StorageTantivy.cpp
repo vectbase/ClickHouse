@@ -42,14 +42,12 @@ public:
         const StorageMetadataPtr & metadata_snapshot,
         const String & tantivy_arg_,
         const UInt64 limit_,
-        const bool ranked_,
-        TantivySearchIndexRW *tantivy_index_)
+        TantivySearchIterWrapper *tantivy_iter_)
         : SourceWithProgress(metadata_snapshot->getSampleBlockForColumns(column_names_, storage.getVirtuals(), storage.getStorageID()))
         , column_names(std::move(column_names_))
         , tantivy_arg(std::move(tantivy_arg_))
         , limit(limit_)
-        , ranked(ranked_)
-        , tantivy_index(tantivy_index_)
+        , tantivy_iter(tantivy_iter_)
     {
     }
 
@@ -58,86 +56,61 @@ public:
 protected:
     Chunk generate() override
     {
-	if (current_stage == 0) {
-            if (ranked) {
-                tantivy_iter = tantivysearch_ranked_search(tantivy_index, tantivy_arg.c_str(), limit);
-            } else {
-                tantivy_iter = tantivysearch_search(tantivy_index, tantivy_arg.c_str(), limit);
-            }
-	    current_stage = 1;
-	} else if (current_stage == 2) {
+        if (current_block_idx == 1)
             return {};
-	}
-
-        size_t iter_size = tantivysearch_iter_count(tantivy_iter);
-	size_t block_size = std::min(iter_size, 65536UL);
 
         Columns columns;
         columns.reserve(column_names.size());
 
-	if (column_names.size() == 1) {
-	    if (column_names[0] == "processo_id") {
-                auto column_proc = ColumnUInt64::create();
-                auto & data_proc = column_proc->getData();
-                data_proc.resize(block_size);
-                size_t written_size = tantivysearch_iter_batch(tantivy_iter, block_size, &data_proc[0], nullptr);
+        auto column_primary = ColumnUInt64::create();
+        auto & data_primary = column_primary->getData();
 
-                columns.push_back(std::move(column_proc));
-		if (written_size == iter_size) {
-                    tantivysearch_iter_free(tantivy_iter);
-                    current_stage = 2;
-		}
-	    } else {
-                tantivysearch_iter_free(tantivy_iter);
+        auto column_secondary = ColumnUInt64::create();
+        auto & data_secondary = column_secondary->getData();
+
+        size_t tantivy_size = tantivysearch_iter_count(tantivy_iter);
+        if (tantivy_size < limit)
+            limit = tantivy_size;
+        data_primary.resize(limit);
+        data_secondary.resize(limit);
+
+        UInt64 i = 0;
+        UInt64 primary_id = 0;
+        UInt64 secondary_id = 0;
+        int r = tantivysearch_iter_next(tantivy_iter, &primary_id, &secondary_id);
+        while (r)
+        {
+            data_primary[i] = primary_id;
+            data_secondary[i] = secondary_id;
+            if (i > limit)
+                break;
+            i++;
+            r = tantivysearch_iter_next(tantivy_iter, &primary_id, &secondary_id);
+        }
+        tantivysearch_iter_free(tantivy_iter);
+
+        for (size_t c=0; c<column_names.size(); c++)
+        {
+            if (column_names[c]=="primary_id")
+                columns.push_back(std::move(column_primary));
+            else if (column_names[c]=="secondary_id")
+                columns.push_back(std::move(column_secondary));
+            else
                 throw Exception(
-                    "Selecting processo_id column is required",
+                    "Selecting colum "+column_names[c]+" is not supported",
                     ErrorCodes::NOT_IMPLEMENTED);
-	    }
-	} else {
-            auto column_proc = ColumnUInt64::create();
-            auto & data_proc = column_proc->getData();
-
-            auto column_mov = ColumnUInt64::create();
-            auto & data_mov = column_mov->getData();
-
-            data_proc.resize(block_size);
-            data_mov.resize(block_size);
-
-            size_t written_size = tantivysearch_iter_batch(tantivy_iter, block_size, &data_proc[0], &data_mov[0]);
-            // std::cerr << "written: " << written_size << std::endl;
-
-            for (size_t c=0; c<column_names.size(); c++)
-            {
-                if (column_names[c]=="processo_id") {
-                    columns.push_back(std::move(column_proc));
-	        } else if (column_names[c]=="movimento_id") {
-                    columns.push_back(std::move(column_mov));
-		} else {
-                    tantivysearch_iter_free(tantivy_iter);
-                    throw Exception(
-                        "Selecting colum "+column_names[c]+" is not supported",
-                        ErrorCodes::NOT_IMPLEMENTED);
-		}
-            }
-
-            if (written_size == iter_size) {
-                tantivysearch_iter_free(tantivy_iter);
-                current_stage = 2;
-            }
-	}
-
-         UInt64 num_rows = columns.at(0)->size();
-         return Chunk(std::move(columns), num_rows);
+        }
+        current_block_idx = 1;
+        UInt64 num_rows = columns.at(0)->size();
+        return Chunk(std::move(columns), num_rows);
     }
 
 private:
     const Names column_names;
-    size_t current_stage = 0;
+    size_t current_block_idx = 0;
     const String tantivy_arg;
     UInt64 limit;
-    bool ranked;
-    TantivySearchIndexRW *tantivy_index;
-    TantivySearchIterWrapper *tantivy_iter = nullptr;
+    TantivySearchIterWrapper *tantivy_iter;
 };
 
 class TantivyBlockOutputStream : public IBlockOutputStream
@@ -166,22 +139,23 @@ public:
                     ErrorCodes::NOT_IMPLEMENTED);
             }
 
-            auto & processo_id =  block.getByName("processo_id");
-            auto processo_id_col = checkAndGetColumn<ColumnUInt64>(processo_id.column.get());
-            auto & movimento_id =  block.getByName("movimento_id");
-            auto movimento_id_col = checkAndGetColumn<ColumnUInt64>(movimento_id.column.get());
+            auto & primary_id =  block.getByName("primary_id");
+            auto primary_id_col = checkAndGetColumn<ColumnUInt64>(primary_id.column.get());
+            auto & secondary_id =  block.getByName("secondary_id");
+            auto secondary_id_col = checkAndGetColumn<ColumnUInt64>(secondary_id.column.get());
             auto & body =  block.getByName("body");
             auto body_col = checkAndGetColumn<ColumnString>(body.column.get());
 
-            if (processo_id_col && movimento_id_col && body_col)
+            if (primary_id_col && secondary_id_col && body_col)
             {
-                auto & processo_data = processo_id_col->getData();
-                auto & movimento_data = movimento_id_col->getData();
+                auto & primary_data = primary_id_col->getData();
+                auto & secondary_data = secondary_id_col->getData();
                 auto & chars = body_col->getChars();
                 auto & offsets = body_col->getOffsets();
                 const char * char_ptr = reinterpret_cast<const char*>(&chars[0]);
 
-                tantivysearch_index(storage.tantivy_index, &processo_data[0], &movimento_data[0], char_ptr, &offsets[0], processo_data.size());
+                int res = tantivysearch_index(storage.tantivy_index, &primary_data[0], &secondary_data[0], char_ptr, &offsets[0], primary_data.size());
+                std::cerr << "index result: " << res << std::endl;
             } else {
                 throw Exception(
                     "Inserts need all columns",
@@ -236,31 +210,22 @@ Pipe StorageTantivy::read(
     }
 
     UInt64 limit = 1000000UL;
-    bool ranked = true;
 
-    if (function->arguments->children.size() > 1)
+    if (function->arguments->children.size() == 2)
     {
         if (function->arguments->children[1]->as<ASTLiteral>())
         {
                 limit = function->arguments->children[1]->as<ASTLiteral &>().value.safeGet<UInt64>();
         }
-
-        if (function->arguments->children.size() > 2)
-        {
-            if (function->arguments->children[2]->as<ASTLiteral>())
-            {
-                    ranked = !!function->arguments->children[2]->as<ASTLiteral &>().value.safeGet<UInt64>();
-            }
-        }
     }
-
-    std::cerr << "ranked: " << ranked << std::endl;
 
     String tantivy_text_arg = function->arguments->children[0]->as<ASTLiteral &>().value.safeGet<String>();
 
+    TantivySearchIterWrapper *tantivy_iter = tantivysearch_search(tantivy_index, tantivy_text_arg.c_str(), limit);
+
     return Pipe(
             std::make_shared<TantivySource>(
-                    column_names, *this, metadata_snapshot, tantivy_text_arg, limit, ranked, tantivy_index
+                    column_names, *this, metadata_snapshot, tantivy_text_arg, limit, tantivy_iter
             ));
 }
 
