@@ -37,6 +37,8 @@ RUN apt-get update \
         lldb-${LLVM_VERSION} \
         --yes --no-install-recommends
 
+RUN curl https://sh.rustup.rs -sSf | sh -s -- -y
+
 COPY build.sh /
 
 CMD ["/bin/bash", "/build.sh"]
