@@ -14,12 +14,6 @@
 #include <lucene++/LuceneHeaders.h>
 #include <lucene++/FileUtils.h>
 #include <lucene++/MiscUtils.h>
-//#include <lucene++/IndexReader.h>
-//namespace Lucene {
-//    class IndexReader;
-//    class IndexWriter;
-//
-//}
 
 namespace DB
 {
@@ -29,14 +23,14 @@ namespace DB
   * It does not support keys.
   * Data is stored as a set of blocks and is not stored anywhere else.
   */
-class StorageTantivy final : public ext::shared_ptr_helper<StorageTantivy>, public IStorage
+class StorageLucene final : public ext::shared_ptr_helper<StorageLucene>, public IStorage
 {
 
-friend struct ext::shared_ptr_helper<StorageTantivy>;
-friend class TantivyBlockOutputStream;
+friend struct ext::shared_ptr_helper<StorageLucene>;
+friend class LuceneBlockOutputStream;
 
 public:
-    String getName() const override { return "Tantivy"; }
+    String getName() const override { return "Lucene"; }
 
     size_t getSize() const { return data.size(); }
 
@@ -94,7 +88,7 @@ private:
     Poco::Logger * log;
 
 protected:
-    StorageTantivy(const StorageID & table_id_, ColumnsDescription columns_description_, ConstraintsDescription constraints_, const String & index_path_);
+    StorageLucene(const StorageID & table_id_, ColumnsDescription columns_description_, ConstraintsDescription constraints_, const String & index_path_);
 };
 
 }

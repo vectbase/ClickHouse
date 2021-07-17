@@ -2,7 +2,7 @@
 
 #include <DataStreams/IBlockInputStream.h>
 
-#include <Storages/StorageTantivy.h>
+#include <Storages/StorageLucene.h>
 #include <Storages/StorageFactory.h>
 #include <Storages/SelectQueryInfo.h>
 
@@ -37,12 +37,12 @@ namespace ErrorCodes
 }
 
 
-class TantivySource : public SourceWithProgress
+class LuceneSource : public SourceWithProgress
 {
 public:
-    TantivySource(
+    LuceneSource(
         Names column_names_,
-        const StorageTantivy & storage_,
+        const StorageLucene & storage_,
         const StorageMetadataPtr & metadata_snapshot_,
         const String & query_text_,
         //const UInt64 limit_,
@@ -68,10 +68,10 @@ public:
         this->hits = collector->topDocs()->scoreDocs;
     }
 
-//    ~TantivySource() override {
+//    ~LuceneSource() override {
 //        this->reader->close();
 //    }
-    String getName() const override { return "Tantivy"; }
+    String getName() const override { return "Lucene"; }
 
 protected:
     Chunk generate() override
@@ -123,11 +123,11 @@ private:
     Lucene::Collection<Lucene::ScoreDocPtr> hits;
 };
 
-class TantivyBlockOutputStream : public IBlockOutputStream
+class LuceneBlockOutputStream : public IBlockOutputStream
 {
 public:
-    explicit TantivyBlockOutputStream(
-        StorageTantivy & storage_,
+    explicit LuceneBlockOutputStream(
+        StorageLucene & storage_,
         const StorageMetadataPtr & metadata_snapshot_)
         : storage(storage_)
         , metadata_snapshot(metadata_snapshot_)
@@ -212,14 +212,14 @@ public:
         }
     }
 private:
-    StorageTantivy & storage;
+    StorageLucene & storage;
     StorageMetadataPtr metadata_snapshot;
     size_t primary_id_pos = 0;
 };
 
 
-StorageTantivy::StorageTantivy(const StorageID & table_id_, ColumnsDescription columns_description_, ConstraintsDescription constraints_, const String & index_path_)
-    : IStorage(table_id_), index_path(index_path_), log(&Poco::Logger::get("StorageTantivy (" + table_id_.table_name + ")"))
+StorageLucene::StorageLucene(const StorageID & table_id_, ColumnsDescription columns_description_, ConstraintsDescription constraints_, const String & index_path_)
+    : IStorage(table_id_), index_path(index_path_), log(&Poco::Logger::get("StorageLucene (" + table_id_.table_name + ")"))
 {
     StorageInMemoryMetadata storage_metadata;
     storage_metadata.setColumns(std::move(columns_description_));
@@ -230,7 +230,7 @@ StorageTantivy::StorageTantivy(const StorageID & table_id_, ColumnsDescription c
 }
 
 
-Pipe StorageTantivy::read(
+Pipe StorageLucene::read(
     const Names & column_names,
     const StorageMetadataPtr & metadata_snapshot,
     SelectQueryInfo & query_info,
@@ -250,10 +250,10 @@ Pipe StorageTantivy::read(
                 ErrorCodes::NOT_IMPLEMENTED);
     }
     const auto * function = where->as<ASTFunction>();
-    if (function->name != "tantivy")
+    if (function->name != "lucene")
     {
         throw Exception(
-                "WHERE clause should contain only tantivy function",
+                "WHERE clause should contain only lucene function",
                 ErrorCodes::NOT_IMPLEMENTED);
     }
 
@@ -270,19 +270,19 @@ Pipe StorageTantivy::read(
     String query_text = function->arguments->children[0]->as<ASTLiteral &>().value.safeGet<String>();
 
 
-
-        //Poco::File(this->index_path)
-        std::wstring_convert<std::codecvt_utf8<wchar_t>> converter;
-        Lucene::String index_path_ws = converter.from_bytes(index_path);
-        Lucene::FSDirectoryPtr dir = Lucene::FSDirectory::open(index_path_ws);
-        if(dir->listAll().empty()) {
-            std::cout << "No files in lucene index path: " << this->index_path << std::endl;
-            return {};
-        }
+    //Poco::File(this->index_path)
+    std::wstring_convert<std::codecvt_utf8<wchar_t>> converter;
+    Lucene::String index_path_ws = converter.from_bytes(index_path);
+    Lucene::FSDirectoryPtr dir = Lucene::FSDirectory::open(index_path_ws);
+    if (dir->listAll().empty())
+    {
+        std::cout << "No files in lucene index path: " << this->index_path << std::endl;
+        return {};
+    }
 
 
     return Pipe(
-            std::make_shared<TantivySource>(
+            std::make_shared<LuceneSource>(
                 column_names,
                 *this,
                 metadata_snapshot,
@@ -292,12 +292,12 @@ Pipe StorageTantivy::read(
             ));
 }
 
-BlockOutputStreamPtr StorageTantivy::write(const ASTPtr & /*query*/, const StorageMetadataPtr & metadata_snapshot, const Context & /*context*/)
+BlockOutputStreamPtr StorageLucene::write(const ASTPtr & /*query*/, const StorageMetadataPtr & metadata_snapshot, const Context & /*context*/)
 {
-    return std::make_shared<TantivyBlockOutputStream>(*this, metadata_snapshot);
+    return std::make_shared<LuceneBlockOutputStream>(*this, metadata_snapshot);
 }
 
-bool StorageTantivy::optimize(
+bool StorageLucene::optimize(
     const ASTPtr & /*query*/,
     const StorageMetadataPtr & /*metadata_snapshot*/,
     const ASTPtr & /*partition*/,
@@ -313,7 +313,7 @@ bool StorageTantivy::optimize(
     return false;
 }
 
-void StorageTantivy::truncate(
+void StorageLucene::truncate(
     const ASTPtr & /*query*/,
     const StorageMetadataPtr & /* metadata_snapshot */,
     const Context & /* context */,
@@ -322,24 +322,24 @@ void StorageTantivy::truncate(
 }
 
 
-std::optional<UInt64> StorageTantivy::totalRows(const Settings &) const
+std::optional<UInt64> StorageLucene::totalRows(const Settings &) const
 {
     /// All modifications of these counters are done under mutex which automatically guarantees synchronization/consistency
     /// When run concurrently we are fine with any value: "before" or "after"
     return total_size_rows.load(std::memory_order_relaxed);
 }
 
-std::optional<UInt64> StorageTantivy::totalBytes(const Settings &) const
+std::optional<UInt64> StorageLucene::totalBytes(const Settings &) const
 {
     return total_size_bytes.load(std::memory_order_relaxed);
 }
 
-void StorageTantivy::startup()
+void StorageLucene::startup()
 {
     return;
 }
 
-void StorageTantivy::shutdown()
+void StorageLucene::shutdown()
 {
 //    if (this->reader) {
 //        this->reader->close();
@@ -350,14 +350,14 @@ void StorageTantivy::shutdown()
     return;
 }
 
-void StorageTantivy::drop() {
+void StorageLucene::drop() {
     Poco::File(index_path).remove(true);
     return;
 }
 
-void registerStorageTantivy(StorageFactory & factory)
+void registerStorageLucene(StorageFactory & factory)
 {
-    factory.registerStorage("Tantivy", [](const StorageFactory::Arguments & args)
+    factory.registerStorage("Lucene", [](const StorageFactory::Arguments & args)
     {
         if (args.engine_args.size() != 1)
             throw Exception(
@@ -366,7 +366,7 @@ void registerStorageTantivy(StorageFactory & factory)
 
         String index_path = args.engine_args[0]->as<ASTLiteral &>().value.safeGet<String>();
 
-        return StorageTantivy::create(args.table_id, args.columns, args.constraints, index_path);
+        return StorageLucene::create(args.table_id, args.columns, args.constraints, index_path);
     });
 }
 
