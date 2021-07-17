@@ -23,6 +23,10 @@
 #include <IO/WriteBufferFromString.h>
 #include <Parsers/IAST.h>
 #include <Common/typeid_cast.h>
+#include <Poco/Path.h>
+#include <Poco/File.h>
+
+#include <codecvt>
 
 namespace DB
 {
@@ -38,19 +42,35 @@ class TantivySource : public SourceWithProgress
 public:
     TantivySource(
         Names column_names_,
-        const StorageTantivy & storage,
-        const StorageMetadataPtr & metadata_snapshot,
-        const String & tantivy_arg_,
-        const UInt64 limit_,
-        TantivySearchIterWrapper *tantivy_iter_)
-        : SourceWithProgress(metadata_snapshot->getSampleBlockForColumns(column_names_, storage.getVirtuals(), storage.getStorageID()))
-        , column_names(std::move(column_names_))
-        , tantivy_arg(std::move(tantivy_arg_))
-        , limit(limit_)
-        , tantivy_iter(tantivy_iter_)
+        const StorageTantivy & storage_,
+        const StorageMetadataPtr & metadata_snapshot_,
+        const String & query_text_,
+        //const UInt64 limit_,
+        Lucene::FSDirectoryPtr dir_)
+        : SourceWithProgress(metadata_snapshot_->getSampleBlockForColumns(column_names_, storage_.getVirtuals(), storage_.getStorageID())),
+        column_names(std::move(column_names_)),
+        metadata_snapshot(metadata_snapshot_),
+        query_text(std::move(query_text_))
+        //limit(limit_),
     {
+
+        this->reader = Lucene::IndexReader::open(dir_, true);
+        std::cout << "Opened lucene index path: " << std::endl;
+
+
+        this->searcher = Lucene::newLucene<Lucene::IndexSearcher>(this->reader);
+        Lucene::AnalyzerPtr analyzer = Lucene::newLucene<Lucene::StandardAnalyzer>(Lucene::LuceneVersion::LUCENE_CURRENT);
+        Lucene::QueryParserPtr parser = Lucene::newLucene<Lucene::QueryParser>(Lucene::LuceneVersion::LUCENE_CURRENT, L"body", analyzer);
+        Lucene::QueryPtr query = parser->parse(Lucene::String(query_text.begin(), query_text.end()));
+        std::cout << "Search for: " << query_text << std::endl;
+        Lucene::TopScoreDocCollectorPtr collector = Lucene::TopScoreDocCollector::create(500, false);
+        searcher->search(query, collector);
+        this->hits = collector->topDocs()->scoreDocs;
     }
 
+//    ~TantivySource() override {
+//        this->reader->close();
+//    }
     String getName() const override { return "Tantivy"; }
 
 protected:
@@ -59,47 +79,34 @@ protected:
         if (current_block_idx == 1)
             return {};
 
-        Columns columns;
-        columns.reserve(column_names.size());
+        const auto & sample_block = metadata_snapshot->getSampleBlock();
+        //const auto & key_column = sample_block.getByName("primary_id");
+        auto columns = sample_block.cloneEmptyColumns();
+        size_t primary_id_pos = sample_block.getPositionByName("primary_id");
+        std::wstring_convert<std::codecvt_utf8<wchar_t>> converter;
 
-        auto column_primary = ColumnUInt64::create();
-        auto & data_primary = column_primary->getData();
-
-        auto column_secondary = ColumnUInt64::create();
-        auto & data_secondary = column_secondary->getData();
-
-        size_t tantivy_size = tantivysearch_iter_count(tantivy_iter);
-        if (tantivy_size < limit)
-            limit = tantivy_size;
-        data_primary.resize(limit);
-        data_secondary.resize(limit);
-
-        UInt64 i = 0;
-        UInt64 primary_id = 0;
-        UInt64 secondary_id = 0;
-        int r = tantivysearch_iter_next(tantivy_iter, &primary_id, &secondary_id);
-        while (r)
+        for (int i = 0; i < hits.size(); ++i)
         {
-            data_primary[i] = primary_id;
-            data_secondary[i] = secondary_id;
-            if (i > limit)
-                break;
-            i++;
-            r = tantivysearch_iter_next(tantivy_iter, &primary_id, &secondary_id);
-        }
-        tantivysearch_iter_free(tantivy_iter);
+            Lucene::DocumentPtr doc = this->searcher->doc(hits[i]->doc);
+            Lucene::String primary_id = doc->get(L"primary_id");
+            Lucene::String secondary_id = doc->get(L"secondary_id");
+            std::wcout << "Lucene searched doc: " << primary_id  << ", " << secondary_id <<std::endl;
 
-        for (size_t c=0; c<column_names.size(); c++)
-        {
-            if (column_names[c]=="primary_id")
-                columns.push_back(std::move(column_primary));
-            else if (column_names[c]=="secondary_id")
-                columns.push_back(std::move(column_secondary));
-            else
-                throw Exception(
-                    "Selecting colum "+column_names[c]+" is not supported",
-                    ErrorCodes::NOT_IMPLEMENTED);
+            String p_id = converter.to_bytes(primary_id);
+            String s_id = converter.to_bytes(secondary_id);
+            ReadBufferFromString primary_id_buffer(p_id);
+            ReadBufferFromString secondary_id_buffer(s_id);
+            std::cout << "Lucene primary_id_buffer=" << p_id << ", secondary_id_buffer=" << s_id << std::endl;
+
+            size_t idx = 0;
+            for (const auto & elem : sample_block)
+            {
+                std::cout << "Lucene elem idx=" << idx << ", primary_id_pos=" << primary_id_pos << std::endl;
+                elem.type->deserializeAsWholeText(*columns[idx], idx == primary_id_pos ? primary_id_buffer : secondary_id_buffer, FormatSettings());
+                ++idx;
+            }
         }
+
         current_block_idx = 1;
         UInt64 num_rows = columns.at(0)->size();
         return Chunk(std::move(columns), num_rows);
@@ -107,10 +114,13 @@ protected:
 
 private:
     const Names column_names;
+    const StorageMetadataPtr metadata_snapshot;
     size_t current_block_idx = 0;
-    const String tantivy_arg;
-    UInt64 limit;
-    TantivySearchIterWrapper *tantivy_iter;
+    const String query_text;
+    //UInt64 limit;
+    Lucene::IndexReaderPtr reader;
+    Lucene::SearcherPtr searcher;
+    Lucene::Collection<Lucene::ScoreDocPtr> hits;
 };
 
 class TantivyBlockOutputStream : public IBlockOutputStream
@@ -121,7 +131,15 @@ public:
         const StorageMetadataPtr & metadata_snapshot_)
         : storage(storage_)
         , metadata_snapshot(metadata_snapshot_)
-    {}
+    {
+        Block sample_block = metadata_snapshot->getSampleBlock();
+        for (const auto & elem : sample_block)
+        {
+            if (elem.name == "primary_id")
+                break;
+            ++primary_id_pos;
+        }
+    }
     Block getHeader() const override { return metadata_snapshot->getSampleBlock(); }
     void write(const Block & block) override
     {
@@ -129,10 +147,6 @@ public:
         const auto size_rows_diff = block.rows();
         metadata_snapshot->check(block, true);
         {
-            // std::lock_guard lock(storage.mutex);
-            // auto new_data = std::make_unique<BlocksList>(*(storage.data.get()));
-            // new_data->push_back(block);
-            // storage.data.set(std::move(new_data));
             if (block.columns() != 3) {
                 throw Exception(
                     "Inserts need all columns",
@@ -148,14 +162,45 @@ public:
 
             if (primary_id_col && secondary_id_col && body_col)
             {
-                auto & primary_data = primary_id_col->getData();
-                auto & secondary_data = secondary_id_col->getData();
-                auto & chars = body_col->getChars();
-                auto & offsets = body_col->getOffsets();
-                const char * char_ptr = reinterpret_cast<const char*>(&chars[0]);
+                std::wstring_convert<std::codecvt_utf8<wchar_t>> converter;
+                Lucene::String index_path_ws = converter.from_bytes(storage.index_path);
+                Lucene::IndexWriterPtr writer = Lucene::newLucene<Lucene::IndexWriter>(
+                    Lucene::FSDirectory::open(index_path_ws),
+                    Lucene::newLucene<Lucene::StandardAnalyzer>(Lucene::LuceneVersion::LUCENE_CURRENT),
+                        true,
+                    Lucene::IndexWriter::MaxFieldLengthLIMITED);
 
-                int res = tantivysearch_index(storage.tantivy_index, &primary_data[0], &secondary_data[0], char_ptr, &offsets[0], primary_data.size());
-                std::cerr << "index result: " << res << std::endl;
+                auto rows = block.rows();
+
+                WriteBufferFromOwnString write_buffer;
+
+                for (size_t i = 0; i < rows; i++)
+                {
+                    std::cout << "Lucene inserting row[" << i << "]" <<std::endl;
+                    Lucene::DocumentPtr doc = Lucene::newLucene<Lucene::Document>();
+                    size_t idx = 0;
+                    for (const auto & elem : block)
+                    {
+                        write_buffer.restart();
+                        auto column_name = block.safeGetByPosition(idx).name;
+
+                        if (idx < block.columns() - 1)
+                        {
+                            elem.type->serializeAsText(*elem.column, i, write_buffer, FormatSettings());
+                            doc->add(Lucene::newLucene<Lucene::Field>(converter.from_bytes(column_name), converter.from_bytes(write_buffer.str()), Lucene::Field::STORE_YES, Lucene::Field::INDEX_NOT_ANALYZED));
+                        } else {
+                            elem.type->serializeAsText(*elem.column, i, write_buffer, FormatSettings());
+                            doc->add(Lucene::newLucene<Lucene::Field>(converter.from_bytes(column_name), converter.from_bytes(write_buffer.str()), Lucene::Field::STORE_NO, Lucene::Field::INDEX_ANALYZED));
+                        }
+                        ++idx;
+                    }
+                    std::cout << "Lucene inserted row[" << i << "]" <<std::endl;
+                    writer->addDocument(doc);
+                }
+                if (rows > 0) {
+                    writer->optimize();
+                }
+                writer->close();
             } else {
                 throw Exception(
                     "Inserts need all columns",
@@ -169,6 +214,7 @@ public:
 private:
     StorageTantivy & storage;
     StorageMetadataPtr metadata_snapshot;
+    size_t primary_id_pos = 0;
 };
 
 
@@ -179,6 +225,8 @@ StorageTantivy::StorageTantivy(const StorageID & table_id_, ColumnsDescription c
     storage_metadata.setColumns(std::move(columns_description_));
     storage_metadata.setConstraints(std::move(constraints_));
     setInMemoryMetadata(storage_metadata);
+
+    Poco::File(index_path + "/").createDirectories();
 }
 
 
@@ -219,13 +267,28 @@ Pipe StorageTantivy::read(
         }
     }
 
-    String tantivy_text_arg = function->arguments->children[0]->as<ASTLiteral &>().value.safeGet<String>();
+    String query_text = function->arguments->children[0]->as<ASTLiteral &>().value.safeGet<String>();
 
-    TantivySearchIterWrapper *tantivy_iter = tantivysearch_search(tantivy_index, tantivy_text_arg.c_str(), limit);
+
+
+        //Poco::File(this->index_path)
+        std::wstring_convert<std::codecvt_utf8<wchar_t>> converter;
+        Lucene::String index_path_ws = converter.from_bytes(index_path);
+        Lucene::FSDirectoryPtr dir = Lucene::FSDirectory::open(index_path_ws);
+        if(dir->listAll().empty()) {
+            std::cout << "No files in lucene index path: " << this->index_path << std::endl;
+            return {};
+        }
+
 
     return Pipe(
             std::make_shared<TantivySource>(
-                    column_names, *this, metadata_snapshot, tantivy_text_arg, limit, tantivy_iter
+                column_names,
+                *this,
+                metadata_snapshot,
+                query_text,
+                //limit,
+                dir
             ));
 }
 
@@ -244,10 +307,9 @@ bool StorageTantivy::optimize(
     const Context & /*context*/)
 {
     std::cerr << "Running optimize" << std::endl;
-    if (tantivysearch_writer_commit(tantivy_index))
-    {
-        return true;
-    }
+//    if (this->writer) {
+//        this->writer->optimize();
+//    }
     return false;
 }
 
@@ -257,8 +319,6 @@ void StorageTantivy::truncate(
     const Context & /* context */,
     TableExclusiveLockHolder &)
 {
-    bool res = tantivysearch_index_truncate(tantivy_index);
-    LOG_DEBUG(log, "Truncated index with result: {}", res);
 }
 
 
@@ -276,24 +336,22 @@ std::optional<UInt64> StorageTantivy::totalBytes(const Settings &) const
 
 void StorageTantivy::startup()
 {
-    this->tantivy_index = tantivysearch_open_or_create_index(index_path.c_str());
     return;
 }
 
 void StorageTantivy::shutdown()
 {
-    if (tantivy_index != nullptr)
-    {
-        tantivysearch_index_free(tantivy_index);
-    }
+//    if (this->reader) {
+//        this->reader->close();
+//    }
+//    if (this->writer) {
+//        this->writer->close();
+//    }
     return;
 }
 
 void StorageTantivy::drop() {
-    if (tantivy_index != nullptr)
-    {
-        tantivysearch_index_delete(tantivy_index);
-    }
+    Poco::File(index_path).remove(true);
     return;
 }
 

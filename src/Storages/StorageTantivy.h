@@ -9,9 +9,17 @@
 #include <Core/NamesAndTypes.h>
 #include <Storages/IStorage.h>
 #include <DataStreams/IBlockOutputStream.h>
-#include <tantivysearch.h>
 #include <common/logger_useful.h>
 
+#include <lucene++/LuceneHeaders.h>
+#include <lucene++/FileUtils.h>
+#include <lucene++/MiscUtils.h>
+//#include <lucene++/IndexReader.h>
+//namespace Lucene {
+//    class IndexReader;
+//    class IndexWriter;
+//
+//}
 
 namespace DB
 {
@@ -79,7 +87,8 @@ private:
     BlocksList data;
     String index_path;
     mutable std::mutex mutex;
-    TantivySearchIndexRW *tantivy_index = nullptr;
+//    Lucene::IndexReaderPtr reader;
+//    Lucene::IndexWriterPtr writer;
     std::atomic<size_t> total_size_bytes = 0;
     std::atomic<size_t> total_size_rows = 0;
     Poco::Logger * log;

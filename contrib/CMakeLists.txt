@@ -309,7 +309,7 @@ if (USE_INTERNAL_ROCKSDB_LIBRARY)
     add_subdirectory(rocksdb-cmake)
 endif()
 
-add_subdirectory(tantivysearch-cmake)
+add_subdirectory(LucenePlusPlus)
 
 if (USE_LIBPQXX)
     add_subdirectory (libpq-cmake)

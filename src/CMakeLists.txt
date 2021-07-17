@@ -89,6 +89,10 @@ if (USE_ROCKSDB)
     add_headers_and_sources(dbms Storages/RocksDB)
 endif()
 
+#if (USE_LUCENE)
+#    add_headers_and_sources(dbms Storages/LUCENE)
+#endif()
+
 if (USE_AWS_S3)
     add_headers_and_sources(dbms Common/S3)
     add_headers_and_sources(dbms Disks/S3)
@@ -339,7 +343,6 @@ dbms_target_link_libraries (
         Poco::JSON
         Poco::MongoDB
         string_utils
-        tantivysearch
     PUBLIC
         ${MYSQLXX_LIBRARY}
         boost::system
@@ -450,6 +453,11 @@ endif ()
 if (USE_ROCKSDB)
     dbms_target_link_libraries(PUBLIC ${ROCKSDB_LIBRARY})
     dbms_target_include_directories(SYSTEM BEFORE PUBLIC ${ROCKSDB_INCLUDE_DIR})
+endif()
+
+if (USE_LUCENE)
+    dbms_target_link_libraries(PUBLIC ${LUCENE_LIBRARY})
+    dbms_target_include_directories(SYSTEM BEFORE PUBLIC ${LUCENE_INCLUDE_DIR})
 endif()
 
 if (USE_LIBPQXX)

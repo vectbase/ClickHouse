@@ -221,3 +221,6 @@
 [submodule "contrib/NuRaft"]
 	path = contrib/NuRaft
 	url = https://github.com/ClickHouse-Extras/NuRaft.git
+[submodule "contrib/LucenePlusPlus"]
+	path = contrib/LucenePlusPlus
+	url =  https://github.com/luceneplusplus/LucenePlusPlus.git
