@@ -80,29 +80,22 @@ protected:
             return {};
 
         const auto & sample_block = metadata_snapshot->getSampleBlock();
-        //const auto & key_column = sample_block.getByName("primary_id");
         auto columns = sample_block.cloneEmptyColumns();
-        size_t primary_id_pos = sample_block.getPositionByName("primary_id");
         std::wstring_convert<std::codecvt_utf8<wchar_t>> converter;
 
         for (int i = 0; i < hits.size(); ++i)
         {
             Lucene::DocumentPtr doc = this->searcher->doc(hits[i]->doc);
-            Lucene::String primary_id = doc->get(L"primary_id");
-            Lucene::String secondary_id = doc->get(L"secondary_id");
-            std::wcout << "Lucene searched doc: " << primary_id  << ", " << secondary_id <<std::endl;
-
-            String p_id = converter.to_bytes(primary_id);
-            String s_id = converter.to_bytes(secondary_id);
-            ReadBufferFromString primary_id_buffer(p_id);
-            ReadBufferFromString secondary_id_buffer(s_id);
-            std::cout << "Lucene primary_id_buffer=" << p_id << ", secondary_id_buffer=" << s_id << std::endl;
 
             size_t idx = 0;
             for (const auto & elem : sample_block)
             {
-                std::cout << "Lucene elem idx=" << idx << ", primary_id_pos=" << primary_id_pos << std::endl;
-                elem.type->deserializeAsWholeText(*columns[idx], idx == primary_id_pos ? primary_id_buffer : secondary_id_buffer, FormatSettings());
+                Lucene::String doc_column_name = converter.from_bytes(elem.name);
+                Lucene::String doc_column_value = doc->get(doc_column_name);
+                String column_value = converter.to_bytes(doc_column_value);
+                ReadBufferFromString column_value_buffer(column_value);
+                std::cout << "Searched: row[" << i << "]column[" << idx << "]: " << elem.name << "=" << column_value << std::endl;
+                elem.type->deserializeAsWholeText(*columns[idx], column_value_buffer, FormatSettings());
                 ++idx;
             }
         }
@@ -132,13 +125,6 @@ public:
         : storage(storage_)
         , metadata_snapshot(metadata_snapshot_)
     {
-        Block sample_block = metadata_snapshot->getSampleBlock();
-        for (const auto & elem : sample_block)
-        {
-            if (elem.name == "primary_id")
-                break;
-            ++primary_id_pos;
-        }
     }
     Block getHeader() const override { return metadata_snapshot->getSampleBlock(); }
     void write(const Block & block) override
@@ -153,59 +139,57 @@ public:
                     ErrorCodes::NOT_IMPLEMENTED);
             }
 
-            auto & primary_id =  block.getByName("primary_id");
-            auto primary_id_col = checkAndGetColumn<ColumnUInt64>(primary_id.column.get());
-            auto & secondary_id =  block.getByName("secondary_id");
-            auto secondary_id_col = checkAndGetColumn<ColumnUInt64>(secondary_id.column.get());
-            auto & body =  block.getByName("body");
-            auto body_col = checkAndGetColumn<ColumnString>(body.column.get());
 
-            if (primary_id_col && secondary_id_col && body_col)
+            std::wstring_convert<std::codecvt_utf8<wchar_t>> converter;
+            Lucene::String index_path_ws = converter.from_bytes(storage.index_path);
+            Lucene::IndexWriterPtr writer = Lucene::newLucene<Lucene::IndexWriter>(
+                Lucene::FSDirectory::open(index_path_ws),
+                Lucene::newLucene<Lucene::StandardAnalyzer>(Lucene::LuceneVersion::LUCENE_CURRENT),
+                true,
+                Lucene::IndexWriter::MaxFieldLengthLIMITED);
+
+            auto rows = block.rows();
+
+            WriteBufferFromOwnString write_buffer;
+
+            for (size_t i = 0; i < rows; i++)
             {
-                std::wstring_convert<std::codecvt_utf8<wchar_t>> converter;
-                Lucene::String index_path_ws = converter.from_bytes(storage.index_path);
-                Lucene::IndexWriterPtr writer = Lucene::newLucene<Lucene::IndexWriter>(
-                    Lucene::FSDirectory::open(index_path_ws),
-                    Lucene::newLucene<Lucene::StandardAnalyzer>(Lucene::LuceneVersion::LUCENE_CURRENT),
-                        true,
-                    Lucene::IndexWriter::MaxFieldLengthLIMITED);
-
-                auto rows = block.rows();
-
-                WriteBufferFromOwnString write_buffer;
-
-                for (size_t i = 0; i < rows; i++)
+                std::cout << "Lucene inserting row[" << i << "]" << std::endl;
+                Lucene::DocumentPtr doc = Lucene::newLucene<Lucene::Document>();
+                size_t idx = 0;
+                for (const auto & elem : block)
                 {
-                    std::cout << "Lucene inserting row[" << i << "]" <<std::endl;
-                    Lucene::DocumentPtr doc = Lucene::newLucene<Lucene::Document>();
-                    size_t idx = 0;
-                    for (const auto & elem : block)
-                    {
-                        write_buffer.restart();
-                        auto column_name = block.safeGetByPosition(idx).name;
+                    write_buffer.restart();
+                    auto column_name = block.safeGetByPosition(idx).name;
 
-                        if (idx < block.columns() - 1)
-                        {
-                            elem.type->serializeAsText(*elem.column, i, write_buffer, FormatSettings());
-                            doc->add(Lucene::newLucene<Lucene::Field>(converter.from_bytes(column_name), converter.from_bytes(write_buffer.str()), Lucene::Field::STORE_YES, Lucene::Field::INDEX_NOT_ANALYZED));
-                        } else {
-                            elem.type->serializeAsText(*elem.column, i, write_buffer, FormatSettings());
-                            doc->add(Lucene::newLucene<Lucene::Field>(converter.from_bytes(column_name), converter.from_bytes(write_buffer.str()), Lucene::Field::STORE_NO, Lucene::Field::INDEX_ANALYZED));
-                        }
-                        ++idx;
+                    if (idx < block.columns() - 1)
+                    {
+                        elem.type->serializeAsText(*elem.column, i, write_buffer, FormatSettings());
+                        doc->add(Lucene::newLucene<Lucene::Field>(
+                            converter.from_bytes(column_name),
+                            converter.from_bytes(write_buffer.str()),
+                            Lucene::Field::STORE_YES,
+                            Lucene::Field::INDEX_NOT_ANALYZED));
                     }
-                    std::cout << "Lucene inserted row[" << i << "]" <<std::endl;
-                    writer->addDocument(doc);
+                    else
+                    {
+                        elem.type->serializeAsText(*elem.column, i, write_buffer, FormatSettings());
+                        doc->add(Lucene::newLucene<Lucene::Field>(
+                            converter.from_bytes(column_name),
+                            converter.from_bytes(write_buffer.str()),
+                            Lucene::Field::STORE_YES,
+                            Lucene::Field::INDEX_ANALYZED));
+                    }
+                    ++idx;
                 }
-                if (rows > 0) {
-                    writer->optimize();
-                }
-                writer->close();
-            } else {
-                throw Exception(
-                    "Inserts need all columns",
-                    ErrorCodes::NOT_IMPLEMENTED);
+                std::cout << "Lucene inserted row[" << i << "]" << std::endl;
+                writer->addDocument(doc);
             }
+            if (rows > 0)
+            {
+                writer->optimize();
+            }
+            writer->close();
 
             storage.total_size_bytes.fetch_add(size_bytes_diff, std::memory_order_relaxed);
             storage.total_size_rows.fetch_add(size_rows_diff, std::memory_order_relaxed);
@@ -214,7 +198,7 @@ public:
 private:
     StorageLucene & storage;
     StorageMetadataPtr metadata_snapshot;
-    size_t primary_id_pos = 0;
+//    size_t primary_id_pos = 0;
 };
 
 
@@ -269,8 +253,6 @@ Pipe StorageLucene::read(
 
     String query_text = function->arguments->children[0]->as<ASTLiteral &>().value.safeGet<String>();
 
-
-    //Poco::File(this->index_path)
     std::wstring_convert<std::codecvt_utf8<wchar_t>> converter;
     Lucene::String index_path_ws = converter.from_bytes(index_path);
     Lucene::FSDirectoryPtr dir = Lucene::FSDirectory::open(index_path_ws);
@@ -307,9 +289,6 @@ bool StorageLucene::optimize(
     const Context & /*context*/)
 {
     std::cerr << "Running optimize" << std::endl;
-//    if (this->writer) {
-//        this->writer->optimize();
-//    }
     return false;
 }
 
@@ -319,6 +298,10 @@ void StorageLucene::truncate(
     const Context & /* context */,
     TableExclusiveLockHolder &)
 {
+    std::cout << "StorageLucene is truncate" << std::endl;
+    Poco::File(this->index_path).remove(true);
+    Poco::File(this->index_path).createDirectories();
+    // TODO: init lucene index files
 }
 
 
@@ -339,18 +322,16 @@ void StorageLucene::startup()
     return;
 }
 
+// when drop table <xxx> is called
 void StorageLucene::shutdown()
 {
-//    if (this->reader) {
-//        this->reader->close();
-//    }
-//    if (this->writer) {
-//        this->writer->close();
-//    }
+    std::cout << "StorageLucene is shutdown" << std::endl;
+    Poco::File(index_path).remove(true);
     return;
 }
 
 void StorageLucene::drop() {
+    std::cout << "StorageLucene is dropped" << std::endl;
     Poco::File(index_path).remove(true);
     return;
 }
