@@ -47,8 +47,8 @@ public:
         size_t max_block_size,
         unsigned num_streams) override;
 
-    void startup() override;
-    void shutdown() override;
+//    void startup() override;
+//    void shutdown() override;
 
     bool supportsParallelInsert() const override { return false; }
 
@@ -69,14 +69,23 @@ public:
         const Context & context,
         TableExclusiveLockHolder &) override;
 
-    void drop() override;
+//    void drop() override;
 
     bool supportsSampling() const override { return false; }
 
     std::optional<UInt64> totalRows(const Settings &) const override;
     std::optional<UInt64> totalBytes(const Settings &) const override;
 
+    struct CommonArguments
+    {
+        StorageID table_id;
+        const ColumnsDescription & columns;
+        const ConstraintsDescription & constraints;
+        const Context & context;
+    };
+
 private:
+    String base_path;
     /// The data itself. `list` - so that when inserted to the end, the existing iterators are not invalidated.
     BlocksList data;
     String index_path;
@@ -88,7 +97,10 @@ private:
     Poco::Logger * log;
 
 protected:
-    StorageLucene(const StorageID & table_id_, ColumnsDescription columns_description_, ConstraintsDescription constraints_, const String & index_path_);
+    StorageLucene(const std::string & relative_table_dir_path, CommonArguments args);
+
+private:
+    explicit StorageLucene(CommonArguments args);
 };
 
 }

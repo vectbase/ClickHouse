@@ -4,6 +4,8 @@
 
 #include <Storages/StorageLucene.h>
 #include <Storages/StorageFactory.h>
+
+#include <Interpreters/Context.h>
 #include <Storages/SelectQueryInfo.h>
 
 #include <Processors/Sources/SourceWithProgress.h>
@@ -34,6 +36,7 @@ namespace DB
 namespace ErrorCodes
 {
     extern const int NUMBER_OF_ARGUMENTS_DOESNT_MATCH;
+    extern const int INCORRECT_FILE_NAME;
 }
 
 
@@ -57,7 +60,6 @@ public:
         this->reader = Lucene::IndexReader::open(dir_, true);
         std::cout << "Opened lucene index path: " << std::endl;
 
-
         this->searcher = Lucene::newLucene<Lucene::IndexSearcher>(this->reader);
         Lucene::AnalyzerPtr analyzer = Lucene::newLucene<Lucene::StandardAnalyzer>(Lucene::LuceneVersion::LUCENE_CURRENT);
         Lucene::QueryParserPtr parser = Lucene::newLucene<Lucene::QueryParser>(Lucene::LuceneVersion::LUCENE_CURRENT, L"body", analyzer);
@@ -68,9 +70,11 @@ public:
         this->hits = collector->topDocs()->scoreDocs;
     }
 
-//    ~LuceneSource() override {
-//        this->reader->close();
-//    }
+    ~LuceneSource() override {
+        this->searcher->close();
+        this->reader->close();
+    }
+
     String getName() const override { return "Lucene"; }
 
 protected:
@@ -142,10 +146,11 @@ public:
 
             std::wstring_convert<std::codecvt_utf8<wchar_t>> converter;
             Lucene::String index_path_ws = converter.from_bytes(storage.index_path);
+            // create a new index if there is not already an index at the provided path
+            // and otherwise open the existing index.
             Lucene::IndexWriterPtr writer = Lucene::newLucene<Lucene::IndexWriter>(
                 Lucene::FSDirectory::open(index_path_ws),
                 Lucene::newLucene<Lucene::StandardAnalyzer>(Lucene::LuceneVersion::LUCENE_CURRENT),
-                true,
                 Lucene::IndexWriter::MaxFieldLengthLIMITED);
 
             auto rows = block.rows();
@@ -202,17 +207,26 @@ private:
 };
 
 
-StorageLucene::StorageLucene(const StorageID & table_id_, ColumnsDescription columns_description_, ConstraintsDescription constraints_, const String & index_path_)
-    : IStorage(table_id_), index_path(index_path_), log(&Poco::Logger::get("StorageLucene (" + table_id_.table_name + ")"))
+StorageLucene::StorageLucene(const std::string & relative_table_dir_path, CommonArguments args)
+    : StorageLucene(args)
 {
-    StorageInMemoryMetadata storage_metadata;
-    storage_metadata.setColumns(std::move(columns_description_));
-    storage_metadata.setConstraints(std::move(constraints_));
-    setInMemoryMetadata(storage_metadata);
+    if (relative_table_dir_path.empty())
+        throw Exception("Storage " + getName() + " requires data path", ErrorCodes::INCORRECT_FILE_NAME);
 
-    Poco::File(index_path + "/").createDirectories();
+    std::cout << "StorageLucene base_path:" << base_path << ", relative_table_dir_path:" << relative_table_dir_path << std::endl;
+    this->index_path = base_path + relative_table_dir_path + "/";
+    Poco::File(this->index_path).createDirectories();
 }
 
+StorageLucene::StorageLucene(CommonArguments args)
+    : IStorage(args.table_id)
+    , base_path(args.context.getPath())
+{
+    StorageInMemoryMetadata storage_metadata;
+    storage_metadata.setColumns(args.columns);
+    storage_metadata.setConstraints(args.constraints);
+    setInMemoryMetadata(storage_metadata);
+}
 
 Pipe StorageLucene::read(
     const Names & column_names,
@@ -317,38 +331,38 @@ std::optional<UInt64> StorageLucene::totalBytes(const Settings &) const
     return total_size_bytes.load(std::memory_order_relaxed);
 }
 
-void StorageLucene::startup()
-{
-    return;
-}
+//void StorageLucene::startup()
+//{
+//    return;
+//}
 
-// when drop table <xxx> is called
-void StorageLucene::shutdown()
-{
-    std::cout << "StorageLucene is shutdown" << std::endl;
-    Poco::File(index_path).remove(true);
-    return;
-}
+// when "DROP TABLE" is called, or clickhouse-server is shutdown
+//void StorageLucene::shutdown()
+//{
+//    std::cout << "StorageLucene is shutdown" << std::endl;
+//    Poco::File(index_path).remove(true);
+//    return;
+//}
 
-void StorageLucene::drop() {
-    std::cout << "StorageLucene is dropped" << std::endl;
-    Poco::File(index_path).remove(true);
-    return;
-}
+//void StorageLucene::drop() {
+//    std::cout << "StorageLucene is dropped" << std::endl;
+//    Poco::File(index_path).remove(true);
+//    return;
+//}
 
 void registerStorageLucene(StorageFactory & factory)
 {
-    factory.registerStorage("Lucene", [](const StorageFactory::Arguments & args)
+    factory.registerStorage("Lucene", [](const StorageFactory::Arguments & factory_args)
     {
-        if (args.engine_args.size() != 1)
-            throw Exception(
-                "Engine " + args.engine_name + " needs the data path argument",
-                ErrorCodes::NUMBER_OF_ARGUMENTS_DOESNT_MATCH);
+        StorageLucene::CommonArguments storage_args{
+            .table_id = factory_args.table_id,
+            .columns = factory_args.columns,
+            .constraints = factory_args.constraints,
+            .context = factory_args.context
+        };
 
-        String index_path = args.engine_args[0]->as<ASTLiteral &>().value.safeGet<String>();
-
-        return StorageLucene::create(args.table_id, args.columns, args.constraints, index_path);
-    });
+        return StorageLucene::create(factory_args.relative_data_path, storage_args);
+   });
 }
 
 }
