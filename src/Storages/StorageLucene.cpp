@@ -48,26 +48,39 @@ public:
         const StorageLucene & storage_,
         const StorageMetadataPtr & metadata_snapshot_,
         const String & query_text_,
-        //const UInt64 limit_,
-        Lucene::FSDirectoryPtr dir_)
+        const Int32 limit_,
+        Lucene::FSDirectoryPtr index_dir_)
         : SourceWithProgress(metadata_snapshot_->getSampleBlockForColumns(column_names_, storage_.getVirtuals(), storage_.getStorageID())),
         column_names(std::move(column_names_)),
         metadata_snapshot(metadata_snapshot_),
-        query_text(std::move(query_text_))
-        //limit(limit_),
+        query_text(std::move(query_text_)),
+        limit(limit_)
     {
-
-        this->reader = Lucene::IndexReader::open(dir_, true);
-        std::cout << "Opened lucene index path: " << std::endl;
+        this->reader = Lucene::IndexReader::open(index_dir_, true);
+        std::cout << "Opened lucene index path" << std::endl;
 
         this->searcher = Lucene::newLucene<Lucene::IndexSearcher>(this->reader);
-        Lucene::AnalyzerPtr analyzer = Lucene::newLucene<Lucene::StandardAnalyzer>(Lucene::LuceneVersion::LUCENE_CURRENT);
-        Lucene::QueryParserPtr parser = Lucene::newLucene<Lucene::QueryParser>(Lucene::LuceneVersion::LUCENE_CURRENT, L"body", analyzer);
-        Lucene::QueryPtr query = parser->parse(Lucene::String(query_text.begin(), query_text.end()));
-        std::cout << "Search for: " << query_text << std::endl;
-        Lucene::TopScoreDocCollectorPtr collector = Lucene::TopScoreDocCollector::create(500, false);
+        Lucene::QueryPtr query;
+        if (!this->query_text.empty())
+        {
+            Lucene::AnalyzerPtr analyzer = Lucene::newLucene<Lucene::StandardAnalyzer>(Lucene::LuceneVersion::LUCENE_CURRENT);
+            Lucene::QueryParserPtr parser
+                = Lucene::newLucene<Lucene::QueryParser>(Lucene::LuceneVersion::LUCENE_CURRENT, L"body", analyzer);
+            std::wstring_convert<std::codecvt_utf8<wchar_t>> converter;
+            query = parser->parse(converter.from_bytes(query_text));
+
+            std::cout << "Search query_text: " << query_text << std::endl;
+        }
+        else
+        {
+            query = Lucene::newLucene<Lucene::MatchAllDocsQuery>();
+            std::cout << "Search all docs" << std::endl;
+        }
+        // Sort, use TopFieldCollector
+        Lucene::TopScoreDocCollectorPtr collector = Lucene::TopScoreDocCollector::create(limit, false);
         searcher->search(query, collector);
         this->hits = collector->topDocs()->scoreDocs;
+
     }
 
     ~LuceneSource() override {
@@ -114,7 +127,7 @@ private:
     const StorageMetadataPtr metadata_snapshot;
     size_t current_block_idx = 0;
     const String query_text;
-    //UInt64 limit;
+    Int32 limit;
     Lucene::IndexReaderPtr reader;
     Lucene::SearcherPtr searcher;
     Lucene::Collection<Lucene::ScoreDocPtr> hits;
@@ -213,8 +226,8 @@ StorageLucene::StorageLucene(const std::string & relative_table_dir_path, Common
     if (relative_table_dir_path.empty())
         throw Exception("Storage " + getName() + " requires data path", ErrorCodes::INCORRECT_FILE_NAME);
 
-    std::cout << "StorageLucene base_path:" << base_path << ", relative_table_dir_path:" << relative_table_dir_path << std::endl;
     this->index_path = base_path + relative_table_dir_path + "/";
+    std::cout << "StorageLucene index_path:" << this->index_path << std::endl;
     Poco::File(this->index_path).createDirectories();
 }
 
@@ -239,38 +252,37 @@ Pipe StorageLucene::read(
 {
     metadata_snapshot->check(column_names, getVirtuals(), getStorageID());
 
+    String query_text;
+    Int32 limit = 10000;
     const ASTSelectQuery & select = query_info.query->as<ASTSelectQuery &>();
     const ASTPtr & where = select.where();
-    if (!where)
+    if (where)
     {
-        throw Exception(
-                "Missing WHERE clause",
-                ErrorCodes::NOT_IMPLEMENTED);
-    }
-    const auto * function = where->as<ASTFunction>();
-    if (function->name != "lucene")
-    {
-        throw Exception(
-                "WHERE clause should contain only lucene function",
-                ErrorCodes::NOT_IMPLEMENTED);
-    }
-
-    UInt64 limit = 1000000UL;
-
-    if (function->arguments->children.size() == 2)
-    {
-        if (function->arguments->children[1]->as<ASTLiteral>())
+        const auto * function = where->as<ASTFunction>();
+        if (function->name != "lucene")
         {
+            throw Exception("WHERE clause should contain only lucene function", ErrorCodes::NOT_IMPLEMENTED);
+        }
+
+        if (function->arguments->children.size() >= 1)
+        {
+            query_text = function->arguments->children[0]->as<ASTLiteral &>().value.safeGet<String>();
+        }
+
+        if (function->arguments->children.size() >= 2)
+        {
+            if (function->arguments->children[1]->as<ASTLiteral>())
+            {
                 limit = function->arguments->children[1]->as<ASTLiteral &>().value.safeGet<UInt64>();
+            }
         }
     }
 
-    String query_text = function->arguments->children[0]->as<ASTLiteral &>().value.safeGet<String>();
 
     std::wstring_convert<std::codecvt_utf8<wchar_t>> converter;
     Lucene::String index_path_ws = converter.from_bytes(index_path);
-    Lucene::FSDirectoryPtr dir = Lucene::FSDirectory::open(index_path_ws);
-    if (dir->listAll().empty())
+    Lucene::FSDirectoryPtr index_dir = Lucene::FSDirectory::open(index_path_ws);
+    if (index_dir->listAll().empty())
     {
         std::cout << "No files in lucene index path: " << this->index_path << std::endl;
         return {};
@@ -283,8 +295,8 @@ Pipe StorageLucene::read(
                 *this,
                 metadata_snapshot,
                 query_text,
-                //limit,
-                dir
+                limit,
+                index_dir
             ));
 }
 
