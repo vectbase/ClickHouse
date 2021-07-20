@@ -64,9 +64,15 @@ public:
         if (!this->query_text.empty())
         {
             Lucene::AnalyzerPtr analyzer = Lucene::newLucene<Lucene::StandardAnalyzer>(Lucene::LuceneVersion::LUCENE_CURRENT);
-            Lucene::QueryParserPtr parser
-                = Lucene::newLucene<Lucene::QueryParser>(Lucene::LuceneVersion::LUCENE_CURRENT, L"body", analyzer);
             std::wstring_convert<std::codecvt_utf8<wchar_t>> converter;
+            Lucene::Collection<Lucene::String> fields = Lucene::Collection<Lucene::String>::newInstance(column_names.size());
+            for (size_t i = 0; i < column_names.size(); ++i)
+            {
+                fields[i] = (converter.from_bytes(column_names[i]));
+            }
+
+            Lucene::QueryParserPtr parser
+                = Lucene::newLucene<Lucene::MultiFieldQueryParser>(Lucene::LuceneVersion::LUCENE_CURRENT, fields, analyzer);
             query = parser->parse(converter.from_bytes(query_text));
 
             std::cout << "Search query_text: " << query_text << std::endl;
@@ -150,13 +156,6 @@ public:
         const auto size_rows_diff = block.rows();
         metadata_snapshot->check(block, true);
         {
-            if (block.columns() != 3) {
-                throw Exception(
-                    "Inserts need all columns",
-                    ErrorCodes::NOT_IMPLEMENTED);
-            }
-
-
             std::wstring_convert<std::codecvt_utf8<wchar_t>> converter;
             Lucene::String index_path_ws = converter.from_bytes(storage.index_path);
             // create a new index if there is not already an index at the provided path
@@ -179,25 +178,13 @@ public:
                 {
                     write_buffer.restart();
                     auto column_name = block.safeGetByPosition(idx).name;
+                    elem.type->serializeAsText(*elem.column, i, write_buffer, FormatSettings());
+                    doc->add(Lucene::newLucene<Lucene::Field>(
+                        converter.from_bytes(column_name),
+                        converter.from_bytes(write_buffer.str()),
+                        Lucene::Field::STORE_YES,
+                        Lucene::Field::INDEX_ANALYZED));
 
-                    if (idx < block.columns() - 1)
-                    {
-                        elem.type->serializeAsText(*elem.column, i, write_buffer, FormatSettings());
-                        doc->add(Lucene::newLucene<Lucene::Field>(
-                            converter.from_bytes(column_name),
-                            converter.from_bytes(write_buffer.str()),
-                            Lucene::Field::STORE_YES,
-                            Lucene::Field::INDEX_NOT_ANALYZED));
-                    }
-                    else
-                    {
-                        elem.type->serializeAsText(*elem.column, i, write_buffer, FormatSettings());
-                        doc->add(Lucene::newLucene<Lucene::Field>(
-                            converter.from_bytes(column_name),
-                            converter.from_bytes(write_buffer.str()),
-                            Lucene::Field::STORE_YES,
-                            Lucene::Field::INDEX_ANALYZED));
-                    }
                     ++idx;
                 }
                 std::cout << "Lucene inserted row[" << i << "]" << std::endl;
@@ -216,7 +203,6 @@ public:
 private:
     StorageLucene & storage;
     StorageMetadataPtr metadata_snapshot;
-//    size_t primary_id_pos = 0;
 };
 
 
