@@ -199,6 +199,13 @@ protected:
     bool parseImpl(Pos & pos, ASTPtr & node, Expected & expected) override;
 };
 
+class ParserAnalyzerDeclarationList : public IParserBase
+{
+protected:
+    const char * getName() const override { return "codec declaration list"; }
+    bool parseImpl(Pos & pos, ASTPtr & node, Expected & expected) override;
+};
+
 /** Parse compression codec
   * CODEC(ZSTD(2))
   */
@@ -206,6 +213,17 @@ class ParserCodec : public IParserBase
 {
 protected:
     const char * getName() const override { return "codec"; }
+    bool parseImpl(Pos & pos, ASTPtr & node, Expected & expected) override;
+};
+
+class ParserAnalyzer : public IParserBase
+{
+private:
+    const char * s;
+public:
+    ParserAnalyzer(const char * s_);
+protected:
+    const char * getName() const override { return "analyzer"; }
     bool parseImpl(Pos & pos, ASTPtr & node, Expected & expected) override;
 };
 

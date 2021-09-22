@@ -815,6 +815,13 @@ bool ParserCodecDeclarationList::parseImpl(Pos & pos, ASTPtr & node, Expected & 
         std::make_unique<ParserToken>(TokenType::Comma), false).parse(pos, node, expected);
 }
 
+bool ParserAnalyzerDeclarationList::parseImpl(Pos & pos, ASTPtr & node, Expected & expected)
+{
+    // TODO:: analyzer family
+    return ParserList(std::make_unique<ParserIdentifierWithOptionalParameters>(),
+        std::make_unique<ParserToken>(TokenType::Comma), false).parse(pos, node, expected);
+}
+
 bool ParserCodec::parseImpl(Pos & pos, ASTPtr & node, Expected & expected)
 {
     ParserCodecDeclarationList codecs;
@@ -833,6 +840,36 @@ bool ParserCodec::parseImpl(Pos & pos, ASTPtr & node, Expected & expected)
 
     auto function_node = std::make_shared<ASTFunction>();
     function_node->name = "CODEC";
+    function_node->arguments = expr_list_args;
+    function_node->children.push_back(function_node->arguments);
+
+    node = function_node;
+    return true;
+}
+
+ParserAnalyzer::ParserAnalyzer(const char* s_):s(s_)
+{
+
+}
+
+bool ParserAnalyzer::parseImpl(Pos & pos, ASTPtr & node, Expected & expected)
+{
+    ParserAnalyzerDeclarationList analyzer;
+    ASTPtr expr_list_args;
+
+    if (pos->type != TokenType::OpeningRoundBracket)
+        return false;
+
+    ++pos;
+    if (!analyzer.parse(pos, expr_list_args, expected))
+        return false;
+
+    if (pos->type != TokenType::ClosingRoundBracket)
+        return false;
+    ++pos;
+
+    auto function_node = std::make_shared<ASTFunction>();
+    function_node->name = s;
     function_node->arguments = expr_list_args;
     function_node->children.push_back(function_node->arguments);
 

@@ -8,6 +8,8 @@
 #include <Interpreters/Context.h>
 #include <Storages/SelectQueryInfo.h>
 
+#include <LuceneAnalyzer/AnalyzerFactory.h>
+
 #include <Processors/Sources/SourceWithProgress.h>
 #include <Processors/Pipe.h>
 
@@ -39,6 +41,7 @@ namespace ErrorCodes
     extern const int INCORRECT_FILE_NAME;
 }
 
+using LuceneConfig = std::unordered_map<String, std::tuple<bool, bool, bool, String, String>>;
 
 class LuceneSource : public SourceWithProgress
 {
@@ -59,12 +62,33 @@ public:
         this->reader = Lucene::IndexReader::open(index_dir_, true);
         std::cout << "Opened lucene index path" << std::endl;
 
+        std::wstring_convert<std::codecvt_utf8<wchar_t>> converter;
+        auto& columns = metadata_snapshot->getColumns();
+        for(auto& column : columns) {
+            auto analyzer = (column.analyzer) ? column.analyzer->children[0]->children[0]->as<ASTFunction>()->name : "StandardAnalyzer";
+            auto search_analyzer = (column.search_analyzer) ? column.search_analyzer->children[0]->children[0]->as<ASTFunction>()->name : analyzer;
+            search_analyzer = Poco::toUpper(search_analyzer);
+            configs[column.name] = std::make_tuple(false, false, false, "", search_analyzer);
+        }
+        auto fieldAnalyzers = Lucene::MapStringAnalyzer::newInstance();
+        for(auto& config: configs)
+        {
+            auto& col_name = config.first;
+            auto& ana_name = std::get<4>(config.second);
+            Lucene::String col_name_ws = converter.from_bytes(col_name);
+            auto ana_name_up = Poco::toUpper(ana_name);
+            fieldAnalyzers.put(col_name_ws, AnalyzerFactory::analyzers.at(ana_name_up));
+        }
+        Lucene::PerFieldAnalyzerWrapperPtr aWrapper =
+            Lucene::newLucene<Lucene::PerFieldAnalyzerWrapper>(
+                Lucene::newLucene<Lucene::StandardAnalyzer>(Lucene::LuceneVersion::LUCENE_CURRENT),
+                fieldAnalyzers);
+
+
         this->searcher = Lucene::newLucene<Lucene::IndexSearcher>(this->reader);
         Lucene::QueryPtr query;
         if (!this->query_text.empty())
         {
-            Lucene::AnalyzerPtr analyzer = Lucene::newLucene<Lucene::StandardAnalyzer>(Lucene::LuceneVersion::LUCENE_CURRENT);
-            std::wstring_convert<std::codecvt_utf8<wchar_t>> converter;
             Lucene::Collection<Lucene::String> fields = Lucene::Collection<Lucene::String>::newInstance(column_names.size());
             for (size_t i = 0; i < column_names.size(); ++i)
             {
@@ -72,7 +96,7 @@ public:
             }
 
             Lucene::QueryParserPtr parser
-                = Lucene::newLucene<Lucene::MultiFieldQueryParser>(Lucene::LuceneVersion::LUCENE_CURRENT, fields, analyzer);
+                = Lucene::newLucene<Lucene::MultiFieldQueryParser>(Lucene::LuceneVersion::LUCENE_CURRENT, fields, aWrapper);
             query = parser->parse(converter.from_bytes(query_text));
 
             std::cout << "Search query_text: " << query_text << std::endl;
@@ -137,6 +161,7 @@ private:
     Lucene::IndexReaderPtr reader;
     Lucene::SearcherPtr searcher;
     Lucene::Collection<Lucene::ScoreDocPtr> hits;
+    LuceneConfig configs;
 };
 
 class LuceneBlockOutputStream : public IBlockOutputStream
@@ -148,6 +173,15 @@ public:
         : storage(storage_)
         , metadata_snapshot(metadata_snapshot_)
     {
+        auto& columns = metadata_snapshot->getColumns();
+        for(auto& column : columns) {
+            bool store = (column.store_modifier) ? *column.store_modifier: false;
+            bool index = (column.index_modifier) ? *column.index_modifier: true;
+            bool termvector = (column.termvector_modifier) ? *column.termvector_modifier: false;
+            auto analyzer = (column.analyzer) ? column.analyzer->children[0]->children[0]->as<ASTFunction>()->name : "StandardAnalyzer";
+            analyzer = Poco::toUpper(analyzer);
+            configs[column.name] = std::make_tuple(store, index, termvector, analyzer, "");
+        }
     }
     Block getHeader() const override { return metadata_snapshot->getSampleBlock(); }
     void write(const Block & block) override
@@ -160,9 +194,21 @@ public:
             Lucene::String index_path_ws = converter.from_bytes(storage.index_path);
             // create a new index if there is not already an index at the provided path
             // and otherwise open the existing index.
+            auto fieldAnalyzers = Lucene::MapStringAnalyzer::newInstance();
+            for(auto& config: configs)
+            {
+                auto& col_name = config.first;
+                auto& ana_name_up = std::get<3>(config.second);
+                Lucene::String col_name_ws = converter.from_bytes(col_name);
+                fieldAnalyzers.put(col_name_ws, AnalyzerFactory::analyzers.at(ana_name_up));
+            }
+            Lucene::PerFieldAnalyzerWrapperPtr aWrapper =
+                Lucene::newLucene<Lucene::PerFieldAnalyzerWrapper>(
+                    Lucene::newLucene<Lucene::StandardAnalyzer>(Lucene::LuceneVersion::LUCENE_CURRENT),
+                    fieldAnalyzers);
             Lucene::IndexWriterPtr writer = Lucene::newLucene<Lucene::IndexWriter>(
                 Lucene::FSDirectory::open(index_path_ws),
-                Lucene::newLucene<Lucene::StandardAnalyzer>(Lucene::LuceneVersion::LUCENE_CURRENT),
+                aWrapper,
                 Lucene::IndexWriter::MaxFieldLengthLIMITED);
 
             auto rows = block.rows();
@@ -178,12 +224,18 @@ public:
                 {
                     write_buffer.restart();
                     auto column_name = block.safeGetByPosition(idx).name;
+                    // TODO: Optimize code structure
+                    auto config = configs[column_name];
+                    auto store = std::get<0>(config);
+                    auto index = std::get<1>(config);
+                    auto termvector = std::get<2>(config);
                     elem.type->serializeAsText(*elem.column, i, write_buffer, FormatSettings());
                     doc->add(Lucene::newLucene<Lucene::Field>(
                         converter.from_bytes(column_name),
                         converter.from_bytes(write_buffer.str()),
-                        Lucene::Field::STORE_YES,
-                        Lucene::Field::INDEX_ANALYZED));
+                        store ? Lucene::Field::STORE_YES : Lucene::Field::STORE_NO,
+                        index ? Lucene::Field::INDEX_ANALYZED : Lucene::Field::INDEX_NOT_ANALYZED,
+                        termvector ? Lucene::Field::TERM_VECTOR_YES : Lucene::Field::TERM_VECTOR_NO));
 
                     ++idx;
                 }
@@ -203,6 +255,7 @@ public:
 private:
     StorageLucene & storage;
     StorageMetadataPtr metadata_snapshot;
+    LuceneConfig configs;
 };
 
 

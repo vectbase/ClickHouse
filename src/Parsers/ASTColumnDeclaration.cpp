@@ -43,6 +43,28 @@ ASTPtr ASTColumnDeclaration::clone() const
         res->children.push_back(res->ttl);
     }
 
+    if (store_modifier) {
+        res->store_modifier = store_modifier;
+    }
+
+    if (index_modifier) {
+        res->index_modifier = index_modifier;
+    }
+
+    if (termvector_modifier) {
+        res->termvector_modifier = termvector_modifier;
+    }
+
+    if (analyzer)
+    {
+        res->analyzer = analyzer;
+    }
+    
+    if (search_analyzer)
+    {
+        res->search_analyzer = search_analyzer;
+    }
+
     return res;
 }
 
@@ -91,6 +113,36 @@ void ASTColumnDeclaration::formatImpl(const FormatSettings & settings, FormatSta
     {
         settings.ostr << ' ' << (settings.hilite ? hilite_keyword : "") << "TTL" << (settings.hilite ? hilite_none : "") << ' ';
         ttl->formatImpl(settings, state, frame);
+    }
+
+    if (store_modifier)
+    {
+        settings.ostr << ' ' << (settings.hilite ? hilite_keyword : "")
+                      << (*store_modifier ? "STORE" : "NOT_STORE")  << (settings.hilite ? hilite_none : "");
+    }
+
+    if (index_modifier)
+    {
+        settings.ostr << ' ' << (settings.hilite ? hilite_keyword : "")
+                      << (*index_modifier ? "INDEX" : "NOT_INDEX")  << (settings.hilite ? hilite_none : "");
+    }
+
+    if (termvector_modifier)
+    {
+        settings.ostr << ' ' << (settings.hilite ? hilite_keyword : "")
+                      << (*termvector_modifier ? "TERMVECTOR" : "NOT_TERMVECTOR")  << (settings.hilite ? hilite_none : "");
+    }
+
+    if (analyzer)
+    {
+        settings.ostr << ' ';
+        analyzer->formatImpl(settings, state, frame);
+    }
+
+    if (search_analyzer)
+    {
+        settings.ostr << ' ';
+        search_analyzer->formatImpl(settings, state, frame);
     }
 }
 

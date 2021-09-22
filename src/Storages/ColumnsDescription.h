@@ -33,6 +33,11 @@ struct ColumnDescription
     String comment;
     ASTPtr codec;
     ASTPtr ttl;
+    std::optional<bool> store_modifier;
+    std::optional<bool> index_modifier;
+    std::optional<bool> termvector_modifier;
+    ASTPtr analyzer;
+    ASTPtr search_analyzer;
 
     ColumnDescription() = default;
     ColumnDescription(ColumnDescription &&) = default;
