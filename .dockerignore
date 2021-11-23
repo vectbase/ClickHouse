@@ -1,0 +1,4 @@
+./contrib
+./.git
+./cmake_build_debug
+./docs
