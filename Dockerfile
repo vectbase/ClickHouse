@@ -2,12 +2,10 @@
 # ===== Builder =====
 # ===================
 
-FROM harbor.vectbase.com/library/clickhouse-server-build:21.11.3 AS builder
+FROM harbor.vectbase.com/library/clickhouse-server-build:21.11.3.6-3 AS builder
 
 # Reconstruct source tree inside docker
-RUN mkdir /clickhouse-server
 WORKDIR /clickhouse-server
-RUN mv /contrib .
 ADD . .
 
 # Build clickhouse-server binary
@@ -17,7 +15,7 @@ RUN /build.sh
 # ==== Clickhouse ====
 # ====================
 
-FROM harbor.vectbase.com/library/ubuntu-for-clickhouse:20.04
+FROM harbor.vectbase.com/library/ubuntu-for-clickhouse:20.04-1
 
 MAINTAINER "Vectbase"
 
