@@ -57,6 +57,7 @@ public:
 
     /// When query_kind == INITIAL_QUERY, these values are equal to current.
     String initial_user;
+    String initial_query;
     String initial_query_id;
     Poco::Net::SocketAddress initial_address;
     time_t initial_query_start_time{};

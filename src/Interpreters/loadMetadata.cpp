@@ -9,7 +9,8 @@
 #include <Interpreters/InterpreterCreateQuery.h>
 #include <Interpreters/Context.h>
 #include <Interpreters/loadMetadata.h>
-
+#include <IO/WriteBufferFromFile.h>
+#include <Common/ZooKeeper/ZooKeeper.h>
 #include <Databases/DatabaseOrdinary.h>
 #include <Databases/TablesLoader.h>
 
@@ -166,7 +167,9 @@ void loadMetadata(ContextMutablePtr context, const String & default_database_nam
     TablesLoader::Databases loaded_databases;
     for (const auto & [name, db_path] : databases)
     {
-        loadDatabase(context, name, db_path, has_force_restore_data_flag);
+        auto db = DatabaseCatalog::instance().tryGetDatabase(name);
+        if (!db)
+            loadDatabase(context, name, db_path, has_force_restore_data_flag);
         loaded_databases.insert({name, DatabaseCatalog::instance().getDatabase(name)});
     }
 
@@ -229,6 +232,41 @@ void loadMetadataSystem(ContextMutablePtr context)
     TablesLoader loader{context, databases, /* force_restore */ true, /* force_attach */ true};
     loader.loadTables();
     /// Will startup tables in system database after all databases are loaded.
+}
+
+void downloadMetaData(ContextMutablePtr context)
+{
+    auto zookeeper = context->getZooKeeper();
+    auto meta_server_path = DEFAULT_ZOOKEEPER_METADATA_PATH;
+    zookeeper->createAncestors(fs::path(meta_server_path) / "default" / "");
+    auto meta_local_path = fs::path(context->getPath()) / "metadata";
+    auto database_names = zookeeper->getChildren(meta_server_path);
+    auto write_to_file = [](const String& file, const String& content){
+        WriteBufferFromFile out(file, content.size(), O_WRONLY | O_CREAT | O_TRUNC);
+        writeString(content, out);
+        out.next();
+        out.close();
+    };
+    for(auto& database : database_names)
+    {
+        String local_db_path = fs::path(meta_local_path)/database;
+        String meta_db_path = fs::path(meta_server_path)/database;
+        String attach_db = zookeeper->get(meta_db_path);
+        if (attach_db.empty())
+            continue;
+        write_to_file(local_db_path + ".sql", attach_db);
+        loadDatabase(context, database, local_db_path, true);
+        auto table_names = zookeeper->getChildren(meta_db_path);
+        for (auto& table : table_names)
+        {
+            String local_tb_path = fs::path(local_db_path)/table;
+            local_tb_path += ".sql";
+            auto attach_table = zookeeper->get(fs::path(meta_db_path)/table);
+            if (attach_table.empty())
+                continue;
+            write_to_file(local_tb_path, attach_table);
+        }
+    }
 }
 
 }

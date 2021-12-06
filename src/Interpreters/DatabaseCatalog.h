@@ -164,6 +164,7 @@ public:
     /// For all of the following methods database_name in table_id must be not empty (even for temporary tables).
     void assertTableDoesntExist(const StorageID & table_id, ContextPtr context) const;
     bool isTableExist(const StorageID & table_id, ContextPtr context) const;
+    bool isTableExist(const String & table_path, ContextPtr context) const;
     bool isDictionaryExist(const StorageID & table_id) const;
 
     StoragePtr getTable(const StorageID & table_id, ContextPtr context) const;

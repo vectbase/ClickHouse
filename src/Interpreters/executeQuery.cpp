@@ -376,11 +376,13 @@ static std::tuple<ASTPtr, BlockIO> executeQueryImpl(
     ContextMutablePtr context,
     bool internal,
     QueryProcessingStage::Enum stage,
-    ReadBuffer * istr)
+    ReadBuffer * istr,
+    bool is_initial = true)
 {
     const auto current_time = std::chrono::system_clock::now();
 
     auto & client_info = context->getClientInfo();
+    client_info.initial_query = String(begin, end);
 
     // If it's not an internal query and we don't see an initial_query_start_time yet, initialize it
     // to current time. Internal queries are those executed without an independent client context,
@@ -596,6 +598,8 @@ static std::tuple<ASTPtr, BlockIO> executeQueryImpl(
 
             return std::make_tuple(ast, std::move(io));
         }
+        // is_initial flag
+        ast->is_initial = is_initial;
 
         auto interpreter = InterpreterFactory::get(ast, context, SelectQueryOptions(stage).setInternal(internal));
 
@@ -977,7 +981,8 @@ void executeQuery(
     bool allow_into_outfile,
     ContextMutablePtr context,
     SetResultDetailsFunc set_result_details,
-    const std::optional<FormatSettings> & output_format_settings)
+    const std::optional<FormatSettings> & output_format_settings,
+    bool is_initial)
 {
     PODArray<char> parse_buf;
     const char * begin;
@@ -1011,7 +1016,7 @@ void executeQuery(
     ASTPtr ast;
     BlockIO streams;
 
-    std::tie(ast, streams) = executeQueryImpl(begin, end, context, false, QueryProcessingStage::Complete, &istr);
+    std::tie(ast, streams) = executeQueryImpl(begin, end, context, false, QueryProcessingStage::Complete, &istr, is_initial);
     auto & pipeline = streams.pipeline;
 
     std::unique_ptr<WriteBuffer> compressed_buffer;

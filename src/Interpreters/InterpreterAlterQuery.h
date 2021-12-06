@@ -34,6 +34,7 @@ private:
     BlockIO executeToDatabase(const ASTAlterQuery & alter);
 
     ASTPtr query_ptr;
+    Poco::Logger * log;
 };
 
 }

@@ -11,6 +11,8 @@
 #include <Common/quoteString.h>
 #include <Common/typeid_cast.h>
 #include <Databases/DatabaseReplicated.h>
+#include <Storages/MergeTree/EphemeralLockInZooKeeper.h>
+#include <filesystem>
 
 #include "config_core.h"
 
@@ -22,6 +24,7 @@
 #   include <Databases/PostgreSQL/DatabaseMaterializedPostgreSQL.h>
 #endif
 
+namespace fs = std::filesystem;
 namespace DB
 {
 
@@ -30,6 +33,7 @@ namespace ErrorCodes
     extern const int LOGICAL_ERROR;
     extern const int SYNTAX_ERROR;
     extern const int UNKNOWN_TABLE;
+    extern const int UNKNOWN_DATABASE;
     extern const int NOT_IMPLEMENTED;
     extern const int INCORRECT_QUERY;
     extern const int TABLE_IS_READ_ONLY;
@@ -50,6 +54,32 @@ InterpreterDropQuery::InterpreterDropQuery(const ASTPtr & query_ptr_, ContextMut
 BlockIO InterpreterDropQuery::execute()
 {
     auto & drop = query_ptr->as<ASTDropQuery &>();
+    if (drop.table.empty() && drop.database.empty())
+        throw Exception("Nothing to drop, both names are empty", ErrorCodes::LOGICAL_ERROR);
+    if (drop.is_initial)
+    {
+        auto zookeeper = getContext()->getZooKeeper();
+        drop.database = drop.database.empty() ? getContext()->getCurrentDatabase() : drop.database;
+        String path = fs::path(DEFAULT_ZOOKEEPER_METADATA_PATH) / drop.database;
+        if (!drop.table.empty())
+            path = fs::path(path) / drop.table;
+
+        if (!DatabaseCatalog::instance().isTableExist(path, getContext()))
+        {
+            if (!drop.if_exists)
+            {
+                if (drop.table.empty())
+                    throw Exception("Database " + drop.database + " doesn't exist.", ErrorCodes::UNKNOWN_DATABASE);
+                else
+                    throw Exception("Table " + drop.database + "." + drop.table + " doesn't exist.", ErrorCodes::UNKNOWN_TABLE);
+            }
+            else
+                return {};
+        }
+        drop.cluster = CLUSTER_TYPE_ALL;
+        executeDDLQueryOnCluster(query_ptr, getContext(), getRequiredAccessForDDLOnCluster(), path, "");
+        return {};
+    }
     if (!drop.cluster.empty())
         return executeDDLQueryOnCluster(query_ptr, getContext(), getRequiredAccessForDDLOnCluster());
 

@@ -509,6 +509,22 @@ if (ThreadFuzzer::instance().isEffective())
     global_context->addWarningMessage("Server was built with sanitizer. It will work slowly.");
 #endif
 
+    if (config().has("running_mode"))
+    {
+        String running_mode = config().getString("running_mode", "compute");
+        if (running_mode == "compute")
+        {
+            global_context->setRunningMode(Context::RunningMode::COMPUTE);
+            LOG_INFO(log, "Running mode is COMPUTE");
+        }
+        else if (running_mode == "store")
+        {
+            global_context->setRunningMode(Context::RunningMode::STORE);
+            LOG_INFO(log, "Running mode is STORE");
+        } else {
+            throw Exception("Invalid running_mode", ErrorCodes::INVALID_CONFIG_PARAMETER);
+        }
+    }
 
     // Initialize global thread pool. Do it before we fetch configs from zookeeper
     // nodes (`from_zk`), because ZooKeeper interface uses the pool. We will
@@ -1138,6 +1154,8 @@ if (ThreadFuzzer::instance().isEffective())
 
     try
     {
+        /// New server download metadata from keeper, and add to server.
+        downloadMetaData(global_context);
         auto & database_catalog = DatabaseCatalog::instance();
         /// We load temporary database first, because projections need it.
         database_catalog.initializeAndLoadTemporaryDatabase();
@@ -1549,6 +1567,9 @@ if (ThreadFuzzer::instance().isEffective())
         for (auto & server : *servers)
             server.start();
         LOG_INFO(log, "Ready for connections.");
+
+        /// Register with clickhouse-keeper and watch on clusters change
+        global_context->setClustersWatcher(std::make_unique<ClustersWatcher>(DEFAULT_ZOOKEEPER_CLUSTERS_PATH, global_context, "ClustersWatcher"));
 
         SCOPE_EXIT_SAFE({
             LOG_DEBUG(log, "Received termination signal.");

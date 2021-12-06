@@ -35,6 +35,9 @@ class IAST : public std::enable_shared_from_this<IAST>, public TypePromotion<IAS
 public:
     ASTs children;
 
+    /// Identify this statement is from user input if true, otherwise is from ddl queue.
+    bool is_initial{true};
+
     virtual ~IAST() = default;
     IAST() = default;
     IAST(const IAST &) = default;

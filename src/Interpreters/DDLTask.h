@@ -40,6 +40,9 @@ struct HostID
 
     HostID() = default;
 
+    explicit HostID(const String & host_name_, const UInt16 port_)
+        : host_name(host_name_), port(port_) {}
+
     explicit HostID(const Cluster::Address & address)
         : host_name(address.host_name), port(address.port) {}
 

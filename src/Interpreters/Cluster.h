@@ -2,6 +2,8 @@
 
 #include <Client/ConnectionPool.h>
 #include <Client/ConnectionPoolWithFailover.h>
+#include <Core/BackgroundSchedulePool.h>
+#include <Interpreters/Context.h>
 
 #include <Poco/Net/SocketAddress.h>
 
@@ -299,6 +301,41 @@ public:
     Impl getContainer() const;
 
 protected:
+    Impl impl;
+    mutable std::mutex mutex;
+};
+
+class ClustersWatcher
+{
+public:
+    ClustersWatcher(const std::string & clusters_path_, ContextPtr context_,
+                    const String & logger_name_ = "ClustersWatcher");
+
+    void startup();
+    void shutdown() { task->deactivate(); }
+
+    void run();
+
+    struct ReplicaInfo {
+        String type; /// compute or store
+        String group; /// for compute replica, it's namespace; for store replica, it's shard
+        String name; /// replica name
+        bool operator==(const ReplicaInfo & other) const
+        {
+            return type == other.type && group == other.group && name == other.name;
+        }
+        String address;
+    };
+    using ReplicaInfoPtr = std::shared_ptr<ReplicaInfo>;
+    using Impl = std::unordered_map<String, ReplicaInfoPtr>;
+
+    Impl getContainer() const;
+
+protected:
+    String clusters_path;
+    ContextMutablePtr context;
+    Poco::Logger * log;
+    BackgroundSchedulePool::TaskHolder task;
     Impl impl;
     mutable std::mutex mutex;
 };

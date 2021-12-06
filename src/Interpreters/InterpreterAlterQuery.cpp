@@ -15,9 +15,11 @@
 #include <Storages/IStorage.h>
 #include <Storages/LiveView/LiveViewCommands.h>
 #include <Storages/LiveView/StorageLiveView.h>
+#include <Storages/MergeTree/EphemeralLockInZooKeeper.h>
 #include <Storages/MutationCommands.h>
 #include <Storages/PartitionCommands.h>
 #include <Common/typeid_cast.h>
+#include <base/logger_useful.h>
 
 #include <boost/range/algorithm_ext/push_back.hpp>
 
@@ -33,10 +35,12 @@ namespace ErrorCodes
     extern const int INCORRECT_QUERY;
     extern const int NOT_IMPLEMENTED;
     extern const int TABLE_IS_READ_ONLY;
+    extern const int CANNOT_ASSIGN_ALTER;
 }
 
 
-InterpreterAlterQuery::InterpreterAlterQuery(const ASTPtr & query_ptr_, ContextPtr context_) : WithContext(context_), query_ptr(query_ptr_)
+InterpreterAlterQuery::InterpreterAlterQuery(const ASTPtr & query_ptr_, ContextPtr context_)
+    : WithContext(context_), query_ptr(query_ptr_), log(&Poco::Logger::get("InterpreterAlterQuery"))
 {
 }
 
@@ -156,6 +160,53 @@ BlockIO InterpreterAlterQuery::executeToTable(const ASTAlterQuery & alter)
                     break;
             }
         }
+    }
+
+    if (alter.is_initial && !alter.table.empty())
+    {
+        const_cast<ASTAlterQuery &>(alter).database = alter.database.empty() ? getContext()->getCurrentDatabase() : alter.database;
+        auto zookeeper = getContext()->getZooKeeper();
+        String path = fs::path(DEFAULT_ZOOKEEPER_METADATA_PATH) / alter.database / alter.table;
+        if (!DatabaseCatalog::instance().isTableExist(path, getContext()))
+        {
+            throw Exception("Table " + alter.database + "." + alter.table + " doesn't exist.", ErrorCodes::UNKNOWN_TABLE);
+        }
+        if(!alter_commands.empty())
+        {
+            String alter_lock_path = fs::path(path) / "lock";
+            Coordination::Error code = zookeeper->tryCreate(alter_lock_path, "", zkutil::CreateMode::Ephemeral);
+            if (code == Coordination::Error::ZNODEEXISTS)
+            {
+                throw Exception("Table " + alter.database + "." + alter.table + " is altered by another one, couldn't acquire lock", ErrorCodes::CANNOT_ASSIGN_ALTER);
+            }
+            auto alter_lock = zkutil::EphemeralNodeHolder::existing(alter_lock_path, *zookeeper);
+
+            /// Format alter commands to sql
+            auto formatAlterCommandsToSql = [&alter, &table] (const String & statement, ContextPtr context, AlterCommands & alter_commands)
+            {
+                const_cast<ASTAlterQuery &>(alter).cluster.clear();
+                StorageInMemoryMetadata metadata = table->getInMemoryMetadata();
+                alter_commands.validate(metadata, context);
+                alter_commands.prepare(metadata);
+                table->checkAlterIsPossible(alter_commands, context);
+                StorageInMemoryMetadata new_metadata = table->getInMemoryMetadata();
+                alter_commands.apply(new_metadata, context);
+                ParserCreateQuery parser;
+                ASTPtr ast = parseQuery(
+                    parser,
+                    statement.data(),
+                    statement.data() + statement.size(),
+                    "in file ",
+                    0,
+                    context->getSettingsRef().max_parser_depth);
+                applyMetadataChangesToCreateQuery(ast, new_metadata);
+                return getObjectDefinitionFromCreateQuery(ast);
+            };
+            String meta_info = formatAlterCommandsToSql(zookeeper->get(path), getContext(), alter_commands);
+            const_cast<ASTAlterQuery &>(alter).cluster = CLUSTER_TYPE_ALL;
+            executeDDLQueryOnCluster(query_ptr, getContext(), getRequiredAccess(), path, meta_info);
+        }
+        return {};
     }
 
     if (!alter_commands.empty())

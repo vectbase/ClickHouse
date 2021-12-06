@@ -2,6 +2,14 @@
 
 #include <base/defines.h>
 
+#define DEFAULT_ZOOKEEPER_METADATA_PATH "/clickhouse/metadata"
+#define CLUSTER_TYPE_COMPUTE "compute"
+#define CLUSTER_TYPE_STORE "store"
+/// Placeholder, meaningless name
+#define CLUSTER_TYPE_ALL "all"
+#define DEFAULT_ZOOKEEPER_CLUSTERS_PATH "/clickhouse/clusters"
+#define STORE_NAMESPACE "shared-store"
+
 #define DBMS_DEFAULT_PORT 9000
 #define DBMS_DEFAULT_SECURE_PORT 9440
 #define DBMS_DEFAULT_CONNECT_TIMEOUT_SEC 10
@@ -64,6 +72,8 @@
 
 /// Max depth of hierarchical dictionary
 #define DBMS_HIERARCHICAL_DICTIONARY_MAX_DEPTH 1000
+
+#define DEFAULT_ZOOKEEPER_CLUSTERS_PATH "/clickhouse/clusters"
 
 /// Query profiler cannot work with sanitizers.
 /// Sanitizers are using quick "frame walking" stack unwinding (this implies -fno-omit-frame-pointer)

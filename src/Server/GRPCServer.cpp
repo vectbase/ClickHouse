@@ -1,6 +1,7 @@
 #include "GRPCServer.h"
 #include <limits>
 #include <memory>
+#include <list>
 #if USE_GRPC
 
 #include <Columns/ColumnString.h>
@@ -46,6 +47,7 @@
 
 using GRPCService = clickhouse::grpc::ClickHouse::AsyncService;
 using GRPCQueryInfo = clickhouse::grpc::QueryInfo;
+using GRPCTicket = clickhouse::grpc::Ticket;
 using GRPCResult = clickhouse::grpc::Result;
 using GRPCException = clickhouse::grpc::Exception;
 using GRPCProgress = clickhouse::grpc::Progress;
@@ -272,6 +274,7 @@ namespace
                            const CompletionCallback & callback) = 0;
 
         virtual void read(GRPCQueryInfo & query_info_, const CompletionCallback & callback) = 0;
+        virtual void read(GRPCTicket & ticket_, const CompletionCallback & callback) = 0;
         virtual void write(const GRPCResult & result, const CompletionCallback & callback) = 0;
         virtual void writeAndFinish(const GRPCResult & result, const grpc::Status & status, const CompletionCallback & callback) = 0;
 
@@ -329,6 +332,8 @@ namespace
         CALL_WITH_STREAM_INPUT,  /// ExecuteQueryWithStreamInput() call
         CALL_WITH_STREAM_OUTPUT, /// ExecuteQueryWithStreamOutput() call
         CALL_WITH_STREAM_IO,     /// ExecuteQueryWithStreamIO() call
+        CALL_SEND_SIMPLE,        /// SendDistributedPlanParams() call
+        CALL_FRAGMENT_WITH_STREAM_OUTPUT,  /// ExecuteQueryFragmentWithStreamOutput() call
         CALL_MAX,
     };
 
@@ -340,6 +345,8 @@ namespace
             case CALL_WITH_STREAM_INPUT: return "ExecuteQueryWithStreamInput()";
             case CALL_WITH_STREAM_OUTPUT: return "ExecuteQueryWithStreamOutput()";
             case CALL_WITH_STREAM_IO: return "ExecuteQueryWithStreamIO()";
+            case CALL_SEND_SIMPLE: return "SendDistributedPlanParams()";
+            case CALL_FRAGMENT_WITH_STREAM_OUTPUT: return "ExecuteQueryFragmentWithStreamOutput()";
             case CALL_MAX: break;
         }
         __builtin_unreachable();
@@ -352,7 +359,7 @@ namespace
 
     bool isOutputStreaming(CallType call_type)
     {
-        return (call_type == CALL_WITH_STREAM_OUTPUT) || (call_type == CALL_WITH_STREAM_IO);
+        return (call_type == CALL_WITH_STREAM_OUTPUT) || (call_type == CALL_WITH_STREAM_IO)  || (call_type == CALL_FRAGMENT_WITH_STREAM_OUTPUT);
     }
 
     template <enum CallType call_type>
@@ -377,6 +384,11 @@ namespace
             query_info_ = std::move(query_info).value();
             query_info.reset();
             callback(true);
+        }
+
+        void read(GRPCTicket &, const CompletionCallback &) override
+        {
+            throw Exception("Responder<CALL_SIMPLE>::read() should not be called", ErrorCodes::LOGICAL_ERROR);
         }
 
         void write(const GRPCResult &, const CompletionCallback &) override
@@ -409,6 +421,11 @@ namespace
         void read(GRPCQueryInfo & query_info_, const CompletionCallback & callback) override
         {
             reader.Read(&query_info_, getCallbackPtr(callback));
+        }
+
+        void read(GRPCTicket &, const CompletionCallback &) override
+        {
+            throw Exception("Responder<CALL_WITH_STREAM_INPUT>::read() should not be called", ErrorCodes::LOGICAL_ERROR);
         }
 
         void write(const GRPCResult &, const CompletionCallback &) override
@@ -446,6 +463,11 @@ namespace
             callback(true);
         }
 
+        void read(GRPCTicket &, const CompletionCallback &) override
+        {
+            throw Exception("Responder<CALL_WITH_STREAM_OUTPUT>::read() should not be called", ErrorCodes::LOGICAL_ERROR);
+        }
+
         void write(const GRPCResult & result, const CompletionCallback & callback) override
         {
             writer.Write(result, getCallbackPtr(callback));
@@ -478,6 +500,11 @@ namespace
             reader_writer.Read(&query_info_, getCallbackPtr(callback));
         }
 
+        void read(GRPCTicket &, const CompletionCallback &) override
+        {
+            throw Exception("Responder<CALL_WITH_STREAM_IO>::read() should not be called", ErrorCodes::LOGICAL_ERROR);
+        }
+
         void write(const GRPCResult & result, const CompletionCallback & callback) override
         {
             reader_writer.Write(result, getCallbackPtr(callback));
@@ -492,6 +519,88 @@ namespace
         grpc::ServerAsyncReaderWriter<GRPCResult, GRPCQueryInfo> reader_writer{&grpc_context};
     };
 
+    template<>
+    class Responder<CALL_SEND_SIMPLE> : public BaseResponder
+    {
+    public:
+        void start(GRPCService & grpc_service,
+                   grpc::ServerCompletionQueue & new_call_queue,
+                   grpc::ServerCompletionQueue & notification_queue,
+                   const CompletionCallback & callback) override
+        {
+            grpc_service.RequestSendDistributedPlanParams(&grpc_context, &query_info.emplace(), &response_writer, &new_call_queue, &notification_queue, getCallbackPtr(callback));
+        }
+
+        void read(GRPCQueryInfo & query_info_, const CompletionCallback & callback) override
+        {
+            if (!query_info.has_value())
+                callback(false);
+            query_info_ = std::move(query_info).value();
+            query_info.reset();
+            callback(true);
+        }
+
+        void read(GRPCTicket &, const CompletionCallback &) override
+        {
+            throw Exception("Responder<CALL_FRAGMENT_SIMPLE>::read() should not be called", ErrorCodes::LOGICAL_ERROR);
+        }
+
+        void write(const GRPCResult &, const CompletionCallback &) override
+        {
+            throw Exception("Responder<CALL_SIMPLE>::write() should not be called", ErrorCodes::LOGICAL_ERROR);
+        }
+
+        void writeAndFinish(const GRPCResult & result, const grpc::Status & status, const CompletionCallback & callback) override
+        {
+            response_writer.Finish(result, status, getCallbackPtr(callback));
+        }
+
+    private:
+        grpc::ServerAsyncResponseWriter<GRPCResult> response_writer{&grpc_context};
+        std::optional<GRPCQueryInfo> query_info;
+    };
+
+    template<>
+    class Responder<CALL_FRAGMENT_WITH_STREAM_OUTPUT> : public BaseResponder
+    {
+    public:
+        void start(GRPCService & grpc_service,
+                   grpc::ServerCompletionQueue & new_call_queue,
+                   grpc::ServerCompletionQueue & notification_queue,
+                   const CompletionCallback & callback) override
+        {
+            grpc_service.RequestExecuteQueryFragmentWithStreamOutput(&grpc_context, &ticket.emplace(), &writer, &new_call_queue, &notification_queue, getCallbackPtr(callback));
+        }
+
+        void read(GRPCQueryInfo &, const CompletionCallback &) override
+        {
+            throw Exception( "Responder<CALL_FRAGMENT_WITH_STREAM_OUTPUT>::read() should not be called", ErrorCodes::LOGICAL_ERROR);
+        }
+
+        void read(GRPCTicket & ticket_, const CompletionCallback & callback) override
+        {
+            if (!ticket.has_value())
+                callback(false);
+            ticket_ = std::move(ticket).value();
+            ticket.reset();
+            callback(true);
+        }
+
+        void write(const GRPCResult & result, const CompletionCallback & callback) override
+        {
+            writer.Write(result, getCallbackPtr(callback));
+        }
+
+        void writeAndFinish(const GRPCResult & result, const grpc::Status & status, const CompletionCallback & callback) override
+        {
+            writer.WriteAndFinish(result, {}, status, getCallbackPtr(callback));
+        }
+
+    private:
+        grpc::ServerAsyncWriter<GRPCResult> writer{&grpc_context};
+        std::optional<GRPCTicket> ticket;
+    };
+
     std::unique_ptr<BaseResponder> makeResponder(CallType call_type)
     {
         switch (call_type)
@@ -500,6 +609,8 @@ namespace
             case CALL_WITH_STREAM_INPUT: return std::make_unique<Responder<CALL_WITH_STREAM_INPUT>>();
             case CALL_WITH_STREAM_OUTPUT: return std::make_unique<Responder<CALL_WITH_STREAM_OUTPUT>>();
             case CALL_WITH_STREAM_IO: return std::make_unique<Responder<CALL_WITH_STREAM_IO>>();
+            case CALL_SEND_SIMPLE: return std::make_unique<Responder<CALL_SEND_SIMPLE>>();
+            case CALL_FRAGMENT_WITH_STREAM_OUTPUT: return std::make_unique<Responder<CALL_FRAGMENT_WITH_STREAM_OUTPUT>>();
             case CALL_MAX: break;
         }
         __builtin_unreachable();
@@ -562,6 +673,36 @@ namespace
         mutable std::condition_variable changed;
     };
 
+    template <class Value>
+    class InnerMap
+    {
+    public:
+        bool getAndErase(const String & key_, Value & value_)
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            auto it = container.find(key_);
+            if (it == container.end())
+                return false;
+            std::swap(it->second, value_);
+            container.erase(it);
+            return true;
+        }
+
+        bool insert(const String& key_, Value && value_)
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            if (container.find(key_) != container.end())
+                return false;
+            container.emplace(key_, value_);
+            return true;
+        }
+
+    private:
+        std::unordered_map<String, Value> container;
+        std::mutex mutex;
+    };
+
+    using QueryInfoMap = InnerMap<GRPCQueryInfo>;
 
     /// Handles a connection after a responder is started (i.e. after getting a new call).
     class Call
@@ -575,7 +716,11 @@ namespace
     private:
         void run();
 
+        void saveQueryInfo();
+        void runPlanFragment();
+
         void receiveQuery();
+        void receiveTicket();
         void executeQuery();
 
         void processInput();
@@ -591,7 +736,9 @@ namespace
         void close();
 
         void readQueryInfo();
+        void readTicket();
         void throwIfFailedToReadQueryInfo();
+        void throwIfFailedToReadTicket();
         bool isQueryCancelled();
 
         void addProgressToResult();
@@ -602,6 +749,8 @@ namespace
         void sendResult();
         void throwIfFailedToSendResult();
         void sendException(const Exception & exception);
+
+        static std::unique_ptr<QueryInfoMap> query_info_map;
 
         const CallType call_type;
         std::unique_ptr<BaseResponder> responder;
@@ -627,8 +776,10 @@ namespace
 
         GRPCQueryInfo query_info; /// We reuse the same messages multiple times.
         GRPCResult result;
+        GRPCTicket ticket;
 
         bool initial_query_info_read = false;
+        bool initial_ticket_read = false;
         bool finalize = false;
         bool responder_finished = false;
         bool cancelled = false;
@@ -648,8 +799,11 @@ namespace
 
         /// The following fields are accessed both from call_thread and queue_thread.
         BoolState reading_query_info{false};
+        BoolState reading_ticket{false};
         std::atomic<bool> failed_to_read_query_info = false;
+        std::atomic<bool> failed_to_read_ticket = false;
         GRPCQueryInfo next_query_info_while_reading;
+        GRPCTicket next_ticket_while_reading;
         std::atomic<bool> want_to_cancel = false;
         std::atomic<bool> check_query_info_contains_cancel_only = false;
         BoolState sending_result{false};
@@ -657,6 +811,8 @@ namespace
 
         ThreadFromGlobalPool call_thread;
     };
+
+    std::unique_ptr<QueryInfoMap> Call::query_info_map = std::make_unique<QueryInfoMap>();
 
     Call::Call(CallType call_type_, std::unique_ptr<BaseResponder> responder_, IServer & iserver_, Poco::Logger * log_)
         : call_type(call_type_), responder(std::move(responder_)), iserver(iserver_), log(log_)
@@ -671,11 +827,19 @@ namespace
 
     void Call::start(const std::function<void(void)> & on_finish_call_callback)
     {
-        auto runner_function = [this, on_finish_call_callback]
+        void (Call::*function_to_run)() = nullptr;
+        if (call_type == CALL_SEND_SIMPLE)
+            function_to_run = &Call::saveQueryInfo;
+        else if (call_type == CALL_FRAGMENT_WITH_STREAM_OUTPUT)
+            function_to_run = &Call::runPlanFragment;
+        else
+            function_to_run = &Call::run;
+
+        auto runner_function = [this, on_finish_call_callback, function_to_run]
         {
             try
             {
-                run();
+                (this->*function_to_run)();
             }
             catch (...)
             {
@@ -711,6 +875,71 @@ namespace
         }
     }
 
+    void Call::saveQueryInfo()
+    {
+        try
+        {
+            setThreadName("GRPCServerCall");
+            receiveQuery();
+            auto query_id = query_info.query_id();
+            auto stage_id = std::to_string(query_info.stage_id());
+            auto sinks = query_info.sinks();
+            /// TODO::Optimize flow
+            for(auto& node_id : sinks)
+            {
+                auto plan_fragment_id = query_id + "/" + stage_id + "/" + node_id;
+                LOG_DEBUG(log, "key: {}", plan_fragment_id);
+                auto status = query_info_map->insert(plan_fragment_id, std::move(query_info));
+                if (!status)
+                {
+                    throw Exception("Plan fragment id " + plan_fragment_id + " already exists", ErrorCodes::LOGICAL_ERROR);
+                }
+            }
+            finishQuery();
+        }
+        catch (Exception & exception)
+        {
+            onException(exception);
+        }
+        catch (Poco::Exception & exception)
+        {
+            onException(Exception{Exception::CreateFromPocoTag{}, exception});
+        }
+        catch (std::exception & exception)
+        {
+            onException(Exception{Exception::CreateFromSTDTag{}, exception});
+        }
+    }
+
+    void Call::runPlanFragment()
+    {
+        try
+        {
+            setThreadName("GRPCServerCall");
+            receiveTicket();
+            auto plan_fragment_id = ticket.query_id() + "/" + std::to_string(ticket.stage_id()) + "/" + ticket.node_id();
+            auto status = query_info_map->getAndErase(plan_fragment_id, query_info);
+            if (!status)
+                throw Exception("Plan fragment id " + plan_fragment_id + " not exists", ErrorCodes::LOGICAL_ERROR);
+            executeQuery();
+            processInput();
+            generateOutput();
+            finishQuery();
+        }
+        catch (Exception & exception)
+        {
+            onException(exception);
+        }
+        catch (Poco::Exception & exception)
+        {
+            onException(Exception{Exception::CreateFromPocoTag{}, exception});
+        }
+        catch (std::exception & exception)
+        {
+            onException(Exception{Exception::CreateFromSTDTag{}, exception});
+        }
+    }
+
     void Call::receiveQuery()
     {
         LOG_INFO(log, "Handling call {}", getCallName(call_type));
@@ -721,6 +950,15 @@ namespace
             throw Exception("Initial query info cannot set the 'cancel' field", ErrorCodes::INVALID_GRPC_QUERY_INFO);
 
         LOG_DEBUG(log, "Received initial QueryInfo: {}", getQueryDescription(query_info));
+    }
+
+    void Call::receiveTicket()
+    {
+        LOG_INFO(log, "Handling call {}", getCallName(call_type));
+
+        readTicket();
+
+        LOG_DEBUG(log, "Received ticket(stream name): {}", ticket.query_id() + "/" + std::to_string(ticket.stage_id()) + "/" + ticket.node_id());
     }
 
     void Call::executeQuery()
@@ -751,6 +989,29 @@ namespace
         }
 
         query_context = session->makeQueryContext();
+
+        auto genQueryPlanFragmentInfo = [](ContextMutablePtr & context_, GRPCQueryInfo & info_)
+        {
+            std::vector<std::shared_ptr<String>> sources, sinks;
+            for (auto & source : info_.sources())
+            {
+                sources.emplace_back(std::make_shared<String>(source));
+            }
+            for (auto & sink : info_.sinks())
+            {
+                sinks.emplace_back(std::make_shared<String>(sink));
+            }
+            Context::QueryPlanFragmentInfo fragmentInfo{
+                .query_id = info_.query_id(),
+                .stage_id = info_.stage_id(),
+                .parent_stage_id = info_.parent_stage_id(),
+                .node_id = info_.node_id(),
+                .sources = sources,
+                .sinks = sinks };
+            context_->setQueryPlanFragmentInfo(std::move(fragmentInfo));
+        };
+
+        genQueryPlanFragmentInfo(query_context, query_info);
 
         /// Prepare settings.
         SettingsChanges settings_changes;
@@ -1177,7 +1438,10 @@ namespace
         finalize = true;
         io.onFinish();
         addProgressToResult();
-        query_scope->logPeakMemoryUsage();
+        if (query_scope.has_value())
+        {
+            query_scope->logPeakMemoryUsage();
+        }
         addLogsToResult();
         releaseQueryIDAndSessionID();
         sendResult();
@@ -1329,6 +1593,41 @@ namespace
         }
     }
 
+    void Call::readTicket()
+    {
+        auto start_reading = [&]
+        {
+            reading_ticket.set(true);
+            responder->read(next_ticket_while_reading, [this](bool ok)
+            {
+                /// Called on queue_thread.
+                if (!ok)
+                {
+                    failed_to_read_ticket = true;
+                }
+                reading_ticket.set(false);
+            });
+        };
+        auto finish_reading = [&]
+        {
+            if (reading_ticket.get())
+            {
+                Stopwatch client_writing_watch;
+                reading_ticket.wait(false);
+                waited_for_client_writing += client_writing_watch.elapsedNanoseconds();
+            }
+            throwIfFailedToReadTicket();
+            ticket = std::move(next_ticket_while_reading);
+            initial_ticket_read = true;
+        };
+        if (!initial_ticket_read)
+        {
+            start_reading();
+        }
+
+        finish_reading();
+    }
+
     void Call::throwIfFailedToReadQueryInfo()
     {
         if (failed_to_read_query_info)
@@ -1337,6 +1636,14 @@ namespace
                 throw Exception("Failed to read extra QueryInfo", ErrorCodes::NETWORK_ERROR);
             else
                 throw Exception("Failed to read initial QueryInfo", ErrorCodes::NETWORK_ERROR);
+        }
+    }
+
+    void Call::throwIfFailedToReadTicket()
+    {
+        if (failed_to_read_ticket)
+        {
+            throw Exception("Failed to read  Ticket", ErrorCodes::NETWORK_ERROR);
         }
     }
 

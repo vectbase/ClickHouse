@@ -59,7 +59,8 @@ BlockIO executeDDLQueryOnCluster(const ASTPtr & query_ptr, ContextPtr context, c
     return executeDDLQueryOnCluster(query_ptr, context, AccessRightsElements{query_requires_access});
 }
 
-BlockIO executeDDLQueryOnCluster(const ASTPtr & query_ptr_, ContextPtr context, AccessRightsElements && query_requires_access)
+BlockIO executeDDLQueryOnCluster(const ASTPtr & query_ptr_, ContextPtr context, AccessRightsElements && query_requires_access,
+                                 const String& meta_path, const String& meta_info)
 {
     /// Remove FORMAT <fmt> and INTO OUTFILE <file> if exists
     ASTPtr query_ptr = query_ptr_->clone();
@@ -84,17 +85,43 @@ BlockIO executeDDLQueryOnCluster(const ASTPtr & query_ptr_, ContextPtr context, 
         }
     }
 
-    query->cluster = context->getMacros()->expand(query->cluster);
-    ClusterPtr cluster = context->getCluster(query->cluster);
+    bool is_all_cluster = query->cluster == CLUSTER_TYPE_ALL;
     DDLWorker & ddl_worker = context->getDDLWorker();
-
-    /// Enumerate hosts which will be used to send query.
-    Cluster::AddressesWithFailover shards = cluster->getShardsAddresses();
     std::vector<HostID> hosts;
-    for (const auto & shard : shards)
+    Cluster::AddressesWithFailover shards;
+    if (!is_all_cluster)
     {
-        for (const auto & addr : shard)
-            hosts.emplace_back(addr);
+        query->cluster = context->getMacros()->expand(query->cluster);
+        ClusterPtr cluster = context->getCluster(query->cluster);
+        /// Enumerate hosts which will be used to send query.
+        shards = cluster->getShardsAddresses();
+        for (const auto & shard : shards)
+        {
+            for (const auto & addr : shard)
+                hosts.emplace_back(addr);
+        }
+    }
+    else
+    {
+        if (meta_path.empty())
+            throw Exception("Empty meta path in a distributed DDL task", ErrorCodes::LOGICAL_ERROR);
+        /// Get Hosts from meta service
+        auto getHostsFromMetaService = [&context](std::vector<HostID>& hosts){
+            auto zookeeper = context->getZooKeeper();
+            auto clusters_path = DEFAULT_ZOOKEEPER_CLUSTERS_PATH;
+            Strings children = zookeeper->getChildren(clusters_path);
+            for(auto& child: children)
+            {
+                auto host_port_str = zookeeper->get(fs::path(clusters_path) / child);
+                auto pos = host_port_str.find(':');
+                if (pos == std::string::npos)
+                    continue;
+                auto host = host_port_str.substr(0, pos);
+                HostID hostId(host, context->getTCPPort());
+                hosts.emplace_back(std::move(hostId));
+            }
+        };
+        getHostsFromMetaService(hosts);
     }
 
     if (hosts.empty())
@@ -110,7 +137,7 @@ BlockIO executeDDLQueryOnCluster(const ASTPtr & query_ptr_, ContextPtr context, 
     bool use_local_default_database = false;
     const String & current_database = context->getCurrentDatabase();
 
-    if (need_replace_current_database)
+    if (!is_all_cluster && need_replace_current_database)
     {
         Strings shard_default_databases;
         for (const auto & shard : shards)
@@ -163,7 +190,7 @@ BlockIO executeDDLQueryOnCluster(const ASTPtr & query_ptr_, ContextPtr context, 
     entry.query = queryToString(query_ptr);
     entry.initiator = ddl_worker.getCommonHostID();
     entry.setSettingsIfRequired(context);
-    String node_path = ddl_worker.enqueueQuery(entry);
+    String node_path = ddl_worker.enqueueQuery(entry, meta_path, meta_info);
 
     return getDistributedDDLStatus(node_path, entry, context);
 }

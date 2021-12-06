@@ -519,7 +519,7 @@ bool DDLWorker::tryExecuteQuery(const String & query, DDLTaskBase & task, const 
         auto query_context = task.makeQueryContext(context, zookeeper);
         if (!task.is_initial_query)
             query_scope.emplace(query_context);
-        executeQuery(istr, ostr, !task.is_initial_query, query_context, {});
+        executeQuery(istr, ostr, !task.is_initial_query, query_context, {}, std::nullopt, false);
 
         if (auto txn = query_context->getZooKeeperMetadataTransaction())
         {
@@ -1042,7 +1042,7 @@ void DDLWorker::createStatusDirs(const std::string & node_path, const ZooKeeperP
 }
 
 
-String DDLWorker::enqueueQuery(DDLLogEntry & entry)
+String DDLWorker::enqueueQuery(DDLLogEntry & entry, const String & meta_path, const String & meta_info)
 {
     if (entry.hosts.empty())
         throw Exception("Empty host list in a distributed DDL task", ErrorCodes::LOGICAL_ERROR);
@@ -1051,8 +1051,34 @@ String DDLWorker::enqueueQuery(DDLLogEntry & entry)
 
     String query_path_prefix = fs::path(queue_dir) / "query-";
     zookeeper->createAncestors(query_path_prefix);
+    String node_path;
+    if (meta_path.empty())
+    {
+        node_path = zookeeper->create(query_path_prefix, entry.toString(), zkutil::CreateMode::PersistentSequential);
+    }
+    else
+    {
+        /// Atomic operation to create dll and save meta info
+        Coordination::Requests ops;
+        ops.emplace_back(zkutil::makeCreateRequest(query_path_prefix, entry.toString(), zkutil::CreateMode::PersistentSequential));
+        if (meta_info.empty())
+        {
+            /// Drop
+            ops.emplace_back(zkutil::makeRemoveRequest(meta_path, -1));
+        }
+        else
+        {
+            if(zookeeper->exists(meta_path))  /// Alter
+                ops.emplace_back(zkutil::makeSetRequest(meta_path, meta_info, -1));
+            else  /// Create
+                ops.emplace_back(zkutil::makeCreateRequest(meta_path, meta_info, zkutil::CreateMode::Persistent));
+        }
 
-    String node_path = zookeeper->create(query_path_prefix, entry.toString(), zkutil::CreateMode::PersistentSequential);
+        /// If this fails, then we'll just retry from the start.
+        auto responses = zookeeper->multi(ops);
+        node_path = dynamic_cast<const Coordination::CreateResponse &>(*responses[0]).path_created;
+    }
+
     if (max_pushed_entry_metric)
     {
         String str_buf = node_path.substr(query_path_prefix.length());
@@ -1074,10 +1100,8 @@ String DDLWorker::enqueueQuery(DDLLogEntry & entry)
     {
         LOG_INFO(log, "An error occurred while creating auxiliary ZooKeeper directories in {} . They will be created later. Error : {}", node_path, getCurrentExceptionMessage(true));
     }
-
     return node_path;
 }
-
 
 bool DDLWorker::initializeMainThread()
 {

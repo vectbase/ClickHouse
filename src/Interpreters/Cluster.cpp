@@ -1,10 +1,13 @@
 #include <Interpreters/Cluster.h>
+#include <Common/Macros.h>
 #include <Common/DNSResolver.h>
 #include <Common/escapeForFileName.h>
 #include <Common/isLocalAddress.h>
 #include <Common/StringUtils/StringUtils.h>
 #include <Common/parseAddress.h>
 #include <Common/Config/AbstractConfigurationComparison.h>
+#include <Common/ZooKeeper/ZooKeeper.h>
+#include <Disks/IDisk.h>
 #include <Core/Settings.h>
 #include <IO/WriteHelpers.h>
 #include <IO/ReadHelpers.h>
@@ -718,6 +721,135 @@ bool Cluster::maybeCrossReplication() const
                 return true;
 
     return false;
+}
+
+ClustersWatcher::ClustersWatcher(const std::string & clusters_path_, ContextPtr context_, const String & logger_name_)
+    : context(Context::createCopy(context_)), log(&Poco::Logger::get(logger_name_))
+{
+    clusters_path = clusters_path_;
+    if (clusters_path.back() == '/')
+        clusters_path.resize(clusters_path.size() - 1);
+
+    task = context->getSchedulePool().createTask("ClustersWatcher", [this] { run(); });
+}
+
+void ClustersWatcher::startup()
+{
+    /// Register with clickhouse-keeper
+    zkutil::ZooKeeperPtr zookeeper = context->getZooKeeper();
+    while (true)
+    {
+        try
+        {
+            /// Create the clusters path if not exist.
+            zookeeper->createAncestors(clusters_path + "/");
+            break;
+        }
+        catch (...)
+        {
+            LOG_ERROR(log, "ZooKeeper error: {}. Failed to create {}.", clusters_path, getCurrentExceptionMessage(true));
+        }
+        sleepForSeconds(5);
+    }
+
+    String node_path;
+    String replica = context->getMacros()->getValue("replica");
+    if (context->getRunningMode() == Context::RunningMode::COMPUTE)
+    {
+        String my_namespace = context->getMacros()->getValue("namespace");
+        node_path = clusters_path + "/compute_" + my_namespace + "_" + replica;
+    }
+    else
+    {
+        String shard = context->getMacros()->getValue("shard");
+        node_path = clusters_path + "/store_" + shard + "_" + replica;
+    }
+
+    UInt16 grpc_port = context->getServerPort("grpc_port");
+    String node_data = replica + ":" + toString(grpc_port);
+
+    Coordination::Requests requests;
+    requests.emplace_back(zkutil::makeCreateRequest(node_path, node_data, zkutil::CreateMode::Ephemeral));
+
+    /// If this fails, then throw on error and die.
+    zookeeper->multi(requests);
+    LOG_INFO(log, "Registered with clickhouse-keeper at {}.", node_path);
+
+    task->activateAndSchedule();
+}
+
+void ClustersWatcher::run()
+{
+    auto parseReplica = [] (const String & key, ReplicaInfo & replica)  {
+        int i = key.find("_");
+        replica.type = key.substr(0, i);
+        int j = key.find("_", i + 1);
+        replica.group = key.substr(i + 1, j - (i + 1));
+        replica.name = key.substr(j + 1, key.length() - (j + 1));
+    };
+    try
+    {
+        zkutil::ZooKeeper::Ptr zookeeper = context->getZooKeeper();
+        Strings replica_znodes
+            = zookeeper->getChildrenWatch(clusters_path, nullptr, task->getWatchCallback());
+        std::set<String> replica_znodes_set(replica_znodes.begin(), replica_znodes.end());
+
+        /// Update clusters cache
+        {
+            std::lock_guard lock(mutex);
+
+            /// Remove outdated replicas
+            std::erase_if(impl, [&replica_znodes_set, this](const auto & replica) {
+                const auto & [key, value] = replica;
+                bool should_removed = !replica_znodes_set.contains(key);
+                if (should_removed) {
+                    LOG_DEBUG(log, "Remove replica {} from cluster cache.", key);
+                }
+                return should_removed;
+            });
+
+            /// Add new replicas
+            zkutil::AsyncResponses<Coordination::GetResponse> futures;
+            for (const auto & znode : replica_znodes)
+            {
+
+                if (!impl.contains(znode))
+                {
+                    futures.emplace_back(znode, zookeeper->asyncGet(fs::path(clusters_path) / znode));
+                }
+            }
+            for (auto & future : futures)
+            {
+                Coordination::GetResponse res = future.second.get();
+                auto replica = std::make_shared<ReplicaInfo>();
+                parseReplica(future.first, *replica);
+                replica->address = res.data;
+                impl[future.first] = replica;
+                LOG_DEBUG(log, "Add replica {} to cluster cache.", future.first);
+            }
+            LOG_DEBUG(log, "Cluster cache size: {}.", impl.size());
+        }
+    }
+    catch (const Coordination::Exception & e)
+    {
+        tryLogCurrentException(log, __PRETTY_FUNCTION__);
+
+        if (e.code == Coordination::Error::ZSESSIONEXPIRED)
+            return;
+
+        task->scheduleAfter(1000);
+    }
+    catch (...)
+    {
+        tryLogCurrentException(log, __PRETTY_FUNCTION__);
+        task->scheduleAfter(1000);
+    }
+}
+
+ClustersWatcher::Impl ClustersWatcher::getContainer() const
+{
+    std::lock_guard lock(mutex);
+    return impl;
 }
 
 }

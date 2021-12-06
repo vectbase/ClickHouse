@@ -197,6 +197,14 @@ void DDLTask::setClusterInfo(ContextPtr context, Poco::Logger * log)
         throw Exception("Received unknown DDL query", ErrorCodes::UNKNOWN_TYPE_OF_QUERY);
 
     cluster_name = query_on_cluster->cluster;
+    /// If all cluster, ignore check
+    if (cluster_name == CLUSTER_TYPE_ALL)
+    {
+        query = query_on_cluster->getRewrittenASTWithoutOnCluster(address_in_cluster.default_database);
+        query_on_cluster = nullptr;
+        return;
+    }
+
     cluster = context->tryGetCluster(cluster_name);
 
     if (!cluster)

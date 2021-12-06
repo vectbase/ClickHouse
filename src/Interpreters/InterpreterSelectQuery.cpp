@@ -594,8 +594,11 @@ BlockIO InterpreterSelectQuery::execute()
 
     buildQueryPlan(query_plan);
 
+    query_plan.buildDistributedPlan(context);
+
+    QueryPlanOptimizationSettings do_not_optimize_plan{.optimize_plan = false};
     res.pipeline = QueryPipelineBuilder::getPipeline(std::move(*query_plan.buildQueryPipeline(
-        QueryPlanOptimizationSettings::fromContext(context), BuildQueryPipelineSettings::fromContext(context))));
+        do_not_optimize_plan, BuildQueryPipelineSettings::fromContext(context))));
     return res;
 }
 

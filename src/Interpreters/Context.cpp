@@ -228,6 +228,7 @@ struct ContextSharedPart
 
     MultiVersion<Macros> macros;                            /// Substitutions extracted from config.
     std::unique_ptr<DDLWorker> ddl_worker;                  /// Process ddl commands from zk.
+    std::unique_ptr<ClustersWatcher> clusters_watcher;
     /// Rules for selecting the compression settings, depending on the size of the part.
     mutable std::unique_ptr<CompressionCodecSelector> compression_codec_selector;
     /// Storage disk chooser for MergeTree engines
@@ -272,6 +273,8 @@ struct ContextSharedPart
     Stopwatch uptime_watch;
 
     Context::ApplicationType application_type = Context::ApplicationType::SERVER;
+
+    Context::RunningMode running_mode = Context::RunningMode::COMPUTE;
 
     /// vector of xdbc-bridge commands, they will be killed when Context will be destroyed
     std::vector<std::unique_ptr<ShellCommand>> bridge_commands;
@@ -371,6 +374,7 @@ struct ContextSharedPart
             distributed_schedule_pool.reset();
             message_broker_schedule_pool.reset();
             ddl_worker.reset();
+            clusters_watcher.reset();
             access_control_manager.reset();
 
             /// Stop trace collector if any
@@ -1795,6 +1799,20 @@ DDLWorker & Context::getDDLWorker() const
     return *shared->ddl_worker;
 }
 
+void Context::setClustersWatcher(std::unique_ptr<ClustersWatcher> clusters_watcher)
+{
+    auto lock = getLock();
+    if (shared->clusters_watcher)
+        throw Exception("ClustersWatcher has already been initialized", ErrorCodes::LOGICAL_ERROR);
+    clusters_watcher->startup();
+    shared->clusters_watcher = std::move(clusters_watcher);
+}
+
+ClustersWatcher & Context::getClustersWatcher() const
+{
+    return *shared->clusters_watcher;
+}
+
 zkutil::ZooKeeperPtr Context::getZooKeeper() const
 {
     std::lock_guard lock(shared->zookeeper_mutex);
@@ -2636,6 +2654,17 @@ void Context::setApplicationType(ApplicationType type)
 {
     /// Lock isn't required, you should set it at start
     shared->application_type = type;
+}
+
+Context::RunningMode Context::getRunningMode() const
+{
+    return shared->running_mode;
+}
+
+void Context::setRunningMode(RunningMode mode)
+{
+    /// Lock isn't required, you should set it at start
+    shared->running_mode = mode;
 }
 
 void Context::setDefaultProfiles(const Poco::Util::AbstractConfiguration & config)

@@ -328,8 +328,11 @@ BlockIO InterpreterSelectWithUnionQuery::execute()
     QueryPlan query_plan;
     buildQueryPlan(query_plan);
 
+    query_plan.buildDistributedPlan(context);
+
+    QueryPlanOptimizationSettings do_not_optimize_plan{.optimize_plan = false};
     auto pipeline_builder = query_plan.buildQueryPipeline(
-        QueryPlanOptimizationSettings::fromContext(context),
+        do_not_optimize_plan,
         BuildQueryPipelineSettings::fromContext(context));
 
     pipeline_builder->addInterpreterContext(context);

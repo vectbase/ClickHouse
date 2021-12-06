@@ -18,6 +18,7 @@
 #include <Poco/Util/AbstractConfiguration.h>
 #include <filesystem>
 #include <Common/filesystemHelpers.h>
+#include <Common/ZooKeeper/ZooKeeper.h>
 
 #include "config_core.h"
 
@@ -449,6 +450,12 @@ bool DatabaseCatalog::isTableExist(const DB::StorageID & table_id, ContextPtr co
             db = iter->second;
     }
     return db && db->isTableExist(table_id.table_name, context_);
+}
+
+bool DatabaseCatalog::isTableExist(const String & table_path, ContextPtr context_) const
+{
+    auto zookeeper = context_->getZooKeeper();
+    return zookeeper->exists(table_path);
 }
 
 void DatabaseCatalog::assertTableDoesntExist(const StorageID & table_id, ContextPtr context_) const

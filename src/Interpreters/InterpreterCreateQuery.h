@@ -93,6 +93,7 @@ private:
     void assertOrSetUUID(ASTCreateQuery & create, const DatabasePtr & database) const;
 
     ASTPtr query_ptr;
+    Poco::Logger * log;
 
     /// Skip safety threshold when loading tables.
     bool has_force_restore_data_flag = false;

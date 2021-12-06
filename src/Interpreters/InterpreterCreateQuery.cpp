@@ -26,6 +26,7 @@
 #include <Parsers/ParserCreateQuery.h>
 #include <Parsers/formatAST.h>
 #include <Parsers/parseQuery.h>
+#include <Parsers/queryToString.h>
 
 #include <Storages/StorageFactory.h>
 #include <Storages/StorageInMemoryMetadata.h>
@@ -93,7 +94,7 @@ namespace ErrorCodes
 namespace fs = std::filesystem;
 
 InterpreterCreateQuery::InterpreterCreateQuery(const ASTPtr & query_ptr_, ContextMutablePtr context_)
-    : WithMutableContext(context_), query_ptr(query_ptr_)
+    : WithMutableContext(context_), query_ptr(query_ptr_), log(&Poco::Logger::get("InterpreterCreateQuery"))
 {
 }
 
@@ -753,7 +754,13 @@ void InterpreterCreateQuery::setEngine(ASTCreateQuery & create) const
                 ErrorCodes::INCORRECT_QUERY);
 
         if (as_create.storage)
+        {
             create.set(create.storage, as_create.storage->ptr());
+            if (create.storage->engine->name == "ReplicatedMergeTree")
+            {
+                create.storage->engine->arguments.reset();
+            }
+        }
         else if (as_create.as_table_function)
             create.as_table_function = as_create.as_table_function->clone();
         else
@@ -1291,6 +1298,79 @@ BlockIO InterpreterCreateQuery::execute()
 {
     FunctionNameNormalizer().visit(query_ptr.get());
     auto & create = query_ptr->as<ASTCreateQuery &>();
+    String current_database = getContext()->getCurrentDatabase();
+    create.database = create.database.empty() ? current_database : create.database;
+    if (create.is_initial && !this->internal)
+    {
+        auto zookeeper = getContext()->getZooKeeper();
+        auto meta_path = DEFAULT_ZOOKEEPER_METADATA_PATH;
+        zookeeper->createIfNotExists(meta_path, String(""));
+        String path = fs::path(meta_path) / create.database;
+        if (!create.table.empty())
+        {
+            path = fs::path(path) / create.table;
+        }
+        LOG_DEBUG(log, "Meta path: {}", path);
+        if (DatabaseCatalog::instance().isTableExist(path, getContext()))
+        {
+            if (create.if_not_exists)
+                return {};
+            else
+            {
+                if (create.table.empty())
+                    throw Exception("Database " + create.database + " already exists.", ErrorCodes::DATABASE_ALREADY_EXISTS);
+                else
+                    throw Exception("Table " + create.database + "." + create.table + " already exists.", ErrorCodes::TABLE_ALREADY_EXISTS);
+            }
+
+        }
+        create.cluster = CLUSTER_TYPE_STORE;
+        prepareOnClusterQuery(create, getContext(), create.cluster);
+        ASTCreateQuery create_tmp = {create};
+        String meta_info;
+        {
+            /// Format ast to sql
+            create.attach = true;
+            create.if_not_exists = false;
+            create.as_database.clear();
+            create.as_table.clear();
+            create.is_populate = false;
+            create.replace_view = false;
+            create.replace_table = false;
+            create.create_or_replace = false;
+            create.format = nullptr;
+            create.out_file = nullptr;
+            create.cluster.clear();
+            if (create.table.empty())
+            {
+                /// Database
+                create.database = TABLE_WITH_UUID_NAME_PLACEHOLDER;
+                if (!create.storage)
+                {
+                    bool old_style_database = getContext()->getSettingsRef().default_database_engine.value == DefaultDatabaseEngine::Ordinary;
+                    auto engine = std::make_shared<ASTFunction>();
+                    auto storage = std::make_shared<ASTStorage>();
+                    engine->name = old_style_database ? "Ordinary" : "Atomic";
+                    engine->no_empty_args = true;
+                    storage->set(storage->engine, engine);
+                    create.set(create.storage, storage);
+                }
+            }
+            else
+            {
+                /// Table
+                create.database.clear();
+                create.table = TABLE_WITH_UUID_NAME_PLACEHOLDER;
+            }
+            meta_info = queryToString(create);
+        }
+        create = create_tmp;
+        /// All cluster to execute
+        create.cluster = CLUSTER_TYPE_ALL;
+        LOG_DEBUG(log, "DDL query on cluster: {}, create {}.{}", create.cluster, create.database, create.table);
+        executeDDLQueryOnCluster(query_ptr, getContext(), getRequiredAccess(), path, meta_info);
+        return {};
+    }
     if (!create.cluster.empty())
     {
         prepareOnClusterQuery(create, getContext(), create.cluster);

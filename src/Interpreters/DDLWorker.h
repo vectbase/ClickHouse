@@ -48,7 +48,8 @@ public:
     virtual ~DDLWorker();
 
     /// Pushes query into DDL queue, returns path to created node
-    virtual String enqueueQuery(DDLLogEntry & entry);
+    /// Synchronize with the meta service if meta_path not empty
+    virtual String enqueueQuery(DDLLogEntry & entry, const String & meta_path = "", const String & meta_info = "");
 
     /// Host ID (name:port) for logging purposes
     /// Note that in each task hosts are identified individually by name:port from initiator server cluster config

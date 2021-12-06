@@ -3,6 +3,7 @@
 #include <Core/Names.h>
 #include <Interpreters/Context_fwd.h>
 #include <Columns/IColumn.h>
+#include <Processors/QueryPlan/DistributedSourceStep.h>
 
 #include <list>
 #include <memory>
@@ -56,6 +57,12 @@ public:
 
     void optimize(const QueryPlanOptimizationSettings & optimization_settings);
 
+    void reset();
+    void buildStages(ContextPtr context);       /// Used by initial node.
+    void scheduleStages(ContextPtr context);    /// Used by initial node.
+    void buildPlanFragment(ContextPtr context); /// Used by non-initial nodes.
+    void buildDistributedPlan(ContextMutablePtr context);
+
     QueryPipelineBuilderPtr buildQueryPipeline(
         const QueryPlanOptimizationSettings & optimization_settings,
         const BuildQueryPipelineSettings & build_pipeline_settings);
@@ -104,6 +111,34 @@ public:
 
     using Nodes = std::list<Node>;
 
+    struct Stage
+    {
+        int id;
+        std::vector<Stage *> parents = {}; /// Previous stages that current stage directly depends on.
+        Stage * child = nullptr;
+        std::vector<std::shared_ptr<String>> executors; /// Replicas that current stage should be executed on.
+        std::vector<std::shared_ptr<String>> sources; /// Parents' executors.
+        std::vector<std::shared_ptr<String>> sinks; /// Child's executors.
+        Node * node; /// Current stage's root node
+    };
+
+    /// Note: do not use vector, otherwise pointers to elements in it will be invalidated when vector increases.
+    using Stages = std::list<Stage>;
+
+    struct PlanFragmentInfo
+    {
+        PlanFragmentInfo(int stage_id_, const String & node_id_, const std::vector<String> & sources_, const std::vector<String> & sinks_)
+            : stage_id(stage_id_), node_id(node_id_), sources(sources_), sinks(sinks_) {}
+        int stage_id;
+        String node_id; /// The replica name of plan fragment receiver, used by DistributedSource.
+        std::vector<String> sources; /// Point to the nodes sending data.
+        std::vector<String> sinks; /// Point to the nodes receiving data.
+    };
+    using PlanFragmentInfoPtr = std::shared_ptr<PlanFragmentInfo>;
+
+    String debugLocalPlanFragment(const String & query_id, int stage_id, const String & node_id, const DistributedSourceStep * stage);
+    String debugRemotePlanFragment(const String & receiver, const String & query_id, const Stage * stage);
+
 private:
     Nodes nodes;
     Node * root = nullptr;
@@ -114,6 +149,23 @@ private:
     /// Those fields are passed to QueryPipeline.
     size_t max_threads = 0;
     std::vector<ContextPtr> interpreter_context;
+
+    Stages stages;
+    Stage * result_stage = nullptr;
+
+    struct pairHasher {
+        template <class T1, class T2>
+        size_t operator()(const std::pair<T1, T2> & p) const
+        {
+            auto hash1 = std::hash<T1>{}(p.first);
+            auto hash2 = std::hash<T2>{}(p.second);
+            return hash1 ^ hash2;
+        }
+    };
+
+    /// Key is {stage_id, receiver_address}.
+    std::unordered_map<std::pair<int, std::shared_ptr<String>>, PlanFragmentInfoPtr, pairHasher> plan_fragment_infos;
+    Poco::Logger * log;
 };
 
 std::string debugExplainStep(const IQueryPlanStep & step);

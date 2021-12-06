@@ -8,6 +8,7 @@
 #include <Interpreters/ClientInfo.h>
 #include <Interpreters/Context_fwd.h>
 #include <Interpreters/DatabaseCatalog.h>
+#include <Interpreters/Cluster.h>
 #include <Parsers/IAST_fwd.h>
 #include <Storages/IStorage_fwd.h>
 #include <Common/MultiVersion.h>
@@ -54,6 +55,7 @@ class BackgroundSchedulePool;
 class MergeList;
 class ReplicatedFetchList;
 class Cluster;
+class ClustersWatcher;
 class Compiler;
 class MarkCache;
 class MMappedFileCache;
@@ -294,10 +296,22 @@ private:
 
 
 public:
+    struct QueryPlanFragmentInfo
+    {
+        String query_id;
+        int stage_id;   /// Stage that should be executed on this replica.
+        int parent_stage_id;
+        String node_id; /// This is myself replica name and grpc port.
+        std::vector<std::shared_ptr<String>> sources; /// Point to replicas that sending data.
+        std::vector<std::shared_ptr<String>> sinks;   /// Point to replicas that receiving data.
+    };
+
     // Top-level OpenTelemetry trace context for the query. Makes sense only for a query context.
     OpenTelemetryTraceContext query_trace_context;
 
 private:
+    std::optional<QueryPlanFragmentInfo> query_plan_fragment_info; /// It has no value if current node is initial compute node.
+
     using SampleBlockCache = std::unordered_map<std::string, Block>;
     mutable SampleBlockCache sample_block_cache;
 
@@ -499,6 +513,10 @@ public:
 
     const QueryFactoriesInfo & getQueryFactoriesInfo() const { return query_factories_info; }
     void addQueryFactoriesInfo(QueryLogFactories factory_type, const String & created_object) const;
+
+    bool isInitialComputeNode() const { return !query_plan_fragment_info; }
+    const QueryPlanFragmentInfo & getQueryPlanFragmentInfo() const { return query_plan_fragment_info.value(); }
+    void setQueryPlanFragmentInfo(const QueryPlanFragmentInfo & query_plan_fragment_info_) { query_plan_fragment_info = query_plan_fragment_info_; }
 
     StoragePtr executeTableFunction(const ASTPtr & table_expression);
 
@@ -741,6 +759,9 @@ public:
     void setDDLWorker(std::unique_ptr<DDLWorker> ddl_worker);
     DDLWorker & getDDLWorker() const;
 
+    void setClustersWatcher(std::unique_ptr<ClustersWatcher> clusters_watcher);
+    ClustersWatcher & getClustersWatcher() const;
+
     std::shared_ptr<Clusters> getClusters() const;
     std::shared_ptr<Cluster> getCluster(const std::string & cluster_name) const;
     std::shared_ptr<Cluster> tryGetCluster(const std::string & cluster_name) const;
@@ -826,6 +847,15 @@ public:
 
     ApplicationType getApplicationType() const;
     void setApplicationType(ApplicationType type);
+
+    enum class RunningMode
+    {
+        COMPUTE,         /// compute server (default)
+        STORE,           /// store server
+    };
+
+    RunningMode getRunningMode() const;
+    void setRunningMode(RunningMode mode);
 
     /// Sets default_profile and system_profile, must be called once during the initialization
     void setDefaultProfiles(const Poco::Util::AbstractConfiguration & config);

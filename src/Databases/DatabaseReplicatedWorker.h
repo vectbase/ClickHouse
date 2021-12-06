@@ -23,7 +23,7 @@ class DatabaseReplicatedDDLWorker : public DDLWorker
 public:
     DatabaseReplicatedDDLWorker(DatabaseReplicated * db, ContextPtr context_);
 
-    String enqueueQuery(DDLLogEntry & entry) override;
+    String enqueueQuery(DDLLogEntry & entry, const String & meta_path = "", const String & meta_info = "") override;
 
     String tryEnqueueAndExecuteEntry(DDLLogEntry & entry, ContextPtr query_context);
 
