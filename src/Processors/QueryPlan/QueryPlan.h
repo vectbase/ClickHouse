@@ -136,7 +136,7 @@ public:
     };
     using PlanFragmentInfoPtr = std::shared_ptr<PlanFragmentInfo>;
 
-    String debugLocalPlanFragment(const String & query_id, int stage_id, const String & node_id, const DistributedSourceStep * stage);
+    String debugLocalPlanFragment(const String & query_id, int stage_id, const String & node_id, const std::vector<Node *> distributed_source_nodes);
     String debugRemotePlanFragment(const String & receiver, const String & query_id, const Stage * stage);
 
 private:

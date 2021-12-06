@@ -17,7 +17,7 @@ public:
         const String & node_id_,
         ContextPtr context_);
 
-    String getName() const override { return "DistributedSourceStep"; }
+    String getName() const override { return "DistributedSourceStep(" + toString(stage_id) + " -> " + toString(parent_stage_id); }
     void initializePipeline(QueryPipelineBuilder & pipeline, const BuildQueryPipelineSettings &) override;
     const std::vector<std::shared_ptr<String>> & getSources() const { return sources; }
 

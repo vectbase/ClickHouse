@@ -186,11 +186,11 @@ void QueryPlan::buildStages(ContextPtr)
             one_child_is_visited = false;
 
             /// TODO: This is shuffle, construct a new stage
-            //            if (false)
-            //            {
-            //                stage_id++; /// current stage
-            //                last_stage = createStage(stage_id, last_stage);
-            //            }
+//            if (false)
+//            {
+//                stage_id++;
+//                last_stage = createStage(stage_id, last_stage, stage_root_node);
+//            }
         }
 
         size_t next_child = frame.visited_children;
@@ -340,15 +340,15 @@ void QueryPlan::scheduleStages(ContextPtr context)
             String my_replica = context->getMacros()->getValue("replica") + ":" + toString(context->getServerPort("grpc_port"));
             auto distributed_source_step = std::make_unique<DistributedSourceStep>(
                 header, parent_stage->executors, query_id, result_stage->id, parent_stage->id, my_replica, context);
+            reset();
+            addStep(std::move(distributed_source_step));
             {
                 /// Only for debug.
                 LOG_DEBUG(
                     log,
                     "Local plan fragment:\n{}",
-                    debugLocalPlanFragment(query_id, result_stage->id, my_replica, distributed_source_step.get()));
+                    debugLocalPlanFragment(query_id, result_stage->id, my_replica, std::vector<Node *>{root}));
             }
-            reset();
-            addStep(std::move(distributed_source_step));
             continue;
         }
 
@@ -365,8 +365,6 @@ void QueryPlan::scheduleStages(ContextPtr context)
         {
             LOG_DEBUG(log, "Plan fragment to send:\nquery: {}\n{}", context->getClientInfo().initial_query, debugRemotePlanFragment(*executor, query_id, &stage));
 
-//            const auto & query_distributed_plan_info = Context::QueryPlanFragmentInfo{
-//                .query_id = query_id, .stage_id = stage->id, .node_id = *executor, .sources = stage->sources, .sinks = stage->sinks};
             GRPCQueryInfo query_info;
             query_info.set_query(context->getClientInfo().initial_query);
             query_info.set_query_id(query_id);
@@ -374,8 +372,6 @@ void QueryPlan::scheduleStages(ContextPtr context)
             if (!stage.parents.empty())
                 query_info.set_parent_stage_id(stage.parents[0]->id);
             query_info.set_node_id(*executor);
-//            query_info.set_user_name(context->getUserName());
-//            query_info.set_password(context->getClientInfo().)
             for (const auto & source : stage.sources)
             {
                 query_info.add_sources(*source);
@@ -394,13 +390,12 @@ void QueryPlan::scheduleStages(ContextPtr context)
 
 void QueryPlan::buildPlanFragment(ContextPtr context)
 {
-    LOG_DEBUG(log, "Building plan fragment.");
+    LOG_DEBUG(log, "Build plan fragment.");
 
     /// Get my replica grpc address
     String my_replica = context->getMacros()->getValue("replica") + ":" + toString(context->getServerPort("grpc_port"));
     const auto & query_distributed_plan_info = context->getQueryPlanFragmentInfo();
     int my_stage_id = query_distributed_plan_info.stage_id;
-//    int parent_stage_id = query_distributed_plan_info.parent_stage_id;
 
     struct Frame
     {
@@ -415,8 +410,8 @@ void QueryPlan::buildPlanFragment(ContextPtr context)
 
     /// Used for locating the plan fragment.
     int stage_id = -1;
-    Node * fragment_root_node = nullptr;
-    Node * fragment_leaf_node = nullptr; /// TODO: For join or union, there are more than one leaf nodes.
+    Node * child_node = nullptr;
+    std::vector<Node *> distributed_source_nodes; /// Only for debug
 
     while (!stack.empty())
     {
@@ -424,53 +419,49 @@ void QueryPlan::buildPlanFragment(ContextPtr context)
 
         if (one_child_is_visited)
         {
-            ++frame.visited_children;
-            one_child_is_visited = false;
-
-            /// TODO: This is a shuffle relationship between current node and the last visited child(i.e. fragment_root_node).
-//            if (true)
+            /// TODO: This is a shuffle dependency between current node and the last visited child.
+//            if (false)
 //            {
 //                stage_id++;
-//                if (stage_id == my_stage_id)
+//                /// Add a DistributedSourceStep between current node and child node.
+//                if (stage_id == query_distributed_plan_info.parent_stage_id) /// TODO: if(query_distributed_plan_info.parent_id_to_sources.contains(stage_id))
 //                {
-//                    root = fragment_root_node;
-//                    DistributedSourceStep * step = nullptr;
-//                    if (fragment_leaf_node)
-//                    {
-//                        /// Set sources for fragment_leaf_node
-//                        step = dynamic_cast<DistributedSourceStep *>(fragment_leaf_node->step.get());
-//                        step->setSources(query_distributed_plan_info.sources);
-//                    }
+//                    /// Create a DistributedSourceStep.
+//                    const auto & header = child_node->step->getOutputStream().header;
+//                    const String & query_id = context->getClientInfo().initial_query_id;
+//                    const auto & sources = query_distributed_plan_info.sources; // TODO: query_distributed_plan_info.parent_id_to_sources[stage_id];
+//                    auto distributed_source_step = std::make_unique<DistributedSourceStep>(
+//                        header, sources, query_id, my_stage_id, stage_id, my_replica, context);
 //
+//                    /// Reuse child node, but replace its step with DistributedSourceStep.
+//                    assert(child_node == frame.node->children[frame.visited_children]);
+//                    child_node->step = std::move(distributed_source_step);
+//                    child_node->children.clear();
+//                    distributed_source_nodes.emplace_back(child_node);
+//                }
+//                else if (stage_id == my_stage_id)
+//                {
+//                    root = child_node;
 //                    {
 //                        /// Only for debug.
 //                        LOG_DEBUG(
 //                            log,
 //                            "Local plan fragment:\n{}",
-//                            debugLocalPlanFragment(query_distributed_plan_info.query_id, stage_id, my_replica, step));
+//                            debugLocalPlanFragment(query_distributed_plan_info.query_id, stage_id, my_replica, distributed_source_nodes));
 //                    }
 //                    return;
 //                }
-//
-//                /// Add a DistributedSourceStep between current node and fragment_root_node.
-//                /// But this step may NOT be executed in my fragment.
-//                frame.node->children.clear();
-//                const auto & header = fragment_root_node->step->getOutputStream().header;
-//                const String & query_id = context->getClientInfo().initial_query_id;
-//                auto distributed_source_step = std::make_unique<DistributedSourceStep>(header, {}, query_id, my_stage_id, parent_stage_id, my_replica, context);
-//                insertStep(frame.node->step, distributed_source_step);
-//                nodes.emplace_back(Node{.step = std::move(step)});
-//                fragment_leaf_node = &nodes.back();
-//                frame.node->children.emplace_back(fragment_leaf_node);
 //            }
+
+            ++frame.visited_children;
+            one_child_is_visited = false;
         }
 
         size_t next_child = frame.visited_children;
         if (next_child == frame.node->children.size())
         {
             LOG_DEBUG(log, "Visited step: {}", frame.node->step->getName());
-
-            fragment_root_node = frame.node;
+            child_node = frame.node;
             one_child_is_visited = true;
             stack.pop();
         }
@@ -482,19 +473,13 @@ void QueryPlan::buildPlanFragment(ContextPtr context)
     ++stage_id;
     if (stage_id == my_stage_id)
     {
-        root = fragment_root_node;
-        DistributedSourceStep * step = nullptr;
-        if (fragment_leaf_node)
-        {
-            step = dynamic_cast<DistributedSourceStep *>(fragment_leaf_node->step.get());
-            step->setSources(query_distributed_plan_info.sources);
-        }
+        root = child_node;
         {
             /// Only for debug.
             LOG_DEBUG(
                 log,
                 "Local plan fragment:\n{}",
-                debugLocalPlanFragment(query_distributed_plan_info.query_id, stage_id, my_replica, step));
+                debugLocalPlanFragment(query_distributed_plan_info.query_id, stage_id, my_replica, distributed_source_nodes));
         }
         return;
     }
@@ -535,18 +520,17 @@ void QueryPlan::buildDistributedPlan(ContextMutablePtr context)
     }
 }
 
-String QueryPlan::debugLocalPlanFragment(const String & query_id, int stage_id, const String & node_id, const DistributedSourceStep * step)
+String QueryPlan::debugLocalPlanFragment(const String & query_id, int stage_id, const String & node_id, const std::vector<Node *> distributed_source_nodes)
 {
     WriteBufferFromOwnString buf;
     ExplainPlanOptions options;
     buf << "fragment id: " << query_id << "/" << stage_id << "/" << node_id << "\n";
-    if (step)
+    for (const auto node : distributed_source_nodes)
     {
-        buf << "sources: ";
-        for (const auto & source : step->getSources())
-        {
+        auto distributed_source_step = dynamic_cast<DistributedSourceStep*>(node->step.get());
+        buf << distributed_source_step->getName() << ": ";
+        for (const auto & source : distributed_source_step->getSources())
             buf << *source << " ";
-        }
         buf.write('\n');
     }
 
