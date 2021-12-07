@@ -26,15 +26,18 @@ using ReadDataCallback = std::function<void(const Block & block)>;
 class GRPCClient
 {
 public:
-    GRPCClient(const String & addr);
-    ~GRPCClient();
+    GRPCClient(const String & addr_);
+    ~GRPCClient() = default;
 
-    /// Send distributed plan to other servers.
-    GRPCResult SendDistributedPlanParams(GRPCQueryInfo & g_query_info);
+    /// Send params of plan fragment to remote, and execute it.
+    GRPCResult executePlanFragment(GRPCQueryInfo & g_query_info);
 
-    /// Try to read a block from the remote server by the specified ticket,
-    /// If got EOF, an empty Block will be returned, you can use if (!block) to check it.
-    Block read(const GRPCTicket & ticket);
+    /// Initialize reader and inner context.
+    void prepareRead(const GRPCTicket & ticket);
+
+    /// Try to read a block from remote.
+    /// If got EOF, an empty block will be returned, you can use if (!block) to check it.
+    Block read();
 
 private:
     struct InnerContext
@@ -57,8 +60,7 @@ private:
 
     Poco::Logger * log;
     String addr;
-    std::map<String, std::shared_ptr<InnerContext>> reader_map;
-    mutable std::shared_mutex mu;
+    std::unique_ptr<InnerContext> inner_context;
 };
 }
 //#endif

@@ -190,6 +190,6 @@ service ClickHouse {
    rpc ExecuteQueryWithStreamOutput(QueryInfo) returns (stream Result) {}
    rpc ExecuteQueryWithStreamIO(stream QueryInfo) returns (stream Result) {}
 
-   rpc SendDistributedPlanParams(QueryInfo) returns (Result) {}
-   rpc ExecuteQueryFragmentWithStreamOutput(Ticket) returns (stream Result) {}
+   rpc ExecutePlanFragment(QueryInfo) returns (Result) {}
+   rpc FetchPlanFragmentResult(Ticket) returns (stream Result) {}
 }

@@ -61,7 +61,7 @@ public:
     void buildStages(ContextPtr context);       /// Used by initial node.
     void scheduleStages(ContextPtr context);    /// Used by initial node.
     void buildPlanFragment(ContextPtr context); /// Used by non-initial nodes.
-    void buildDistributedPlan(ContextMutablePtr context);
+    void buildDistributedPlan(ContextPtr context);
 
     QueryPipelineBuilderPtr buildQueryPipeline(
         const QueryPlanOptimizationSettings & optimization_settings,

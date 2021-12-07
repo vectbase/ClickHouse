@@ -17,9 +17,11 @@ DistributedSourceExecutor::DistributedSourceExecutor(
     , client(*source_)
     , log(&Poco::Logger::get("DistributedSourceExecutor(" + query_id + "/" + toString(stage_id) + "/" + node_id + ")"))
 {
+    GRPCTicket ticket;
     ticket.set_query_id(query_id);
     ticket.set_stage_id(stage_id);
     ticket.set_node_id(node_id);
+    client.prepareRead(ticket);
 }
 
 DistributedSourceExecutor::~DistributedSourceExecutor()
@@ -33,7 +35,7 @@ Block DistributedSourceExecutor::read()
 
     try
     {
-        auto block = client.read(ticket);
+        auto block = client.read();
         LOG_DEBUG(log, "Read block, rows: {}, columns: {}.", block.rows(), block.columns());
         return block;
     }

@@ -363,10 +363,11 @@ void QueryPlan::scheduleStages(ContextPtr context)
         /// Send to each remote executor.
         for (const auto & executor : stage.executors)
         {
-            LOG_DEBUG(log, "Plan fragment to send:\nquery: {}\n{}", context->getClientInfo().initial_query, debugRemotePlanFragment(*executor, query_id, &stage));
-
             GRPCQueryInfo query_info;
-            query_info.set_query(context->getClientInfo().initial_query);
+            if (!context->getSelectQuery().empty())
+                query_info.set_query(context->getSelectQuery());
+            else
+                query_info.set_query(context->getClientInfo().initial_query);
             query_info.set_query_id(query_id);
             query_info.set_stage_id(stage.id);
             if (!stage.parents.empty())
@@ -380,10 +381,11 @@ void QueryPlan::scheduleStages(ContextPtr context)
             {
                 query_info.add_sinks(*sink);
             }
+            LOG_DEBUG(log, "Plan fragment to send:\nquery: {}\n{}",  query_info.query(), debugRemotePlanFragment(*executor, query_id, &stage));
 
             GRPCClient cli(*executor);
-            auto result = cli.SendDistributedPlanParams(query_info);
-            LOG_INFO(log, "GRPCClient got result exception: {} {}.", result.exception().code(), result.exception().display_text());
+            auto result = cli.executePlanFragment(query_info);
+            LOG_DEBUG(log, "GRPCClient got result, exception code: {}, exception text: {}.", result.exception().code(), result.exception().display_text());
         }
     }
 }
@@ -485,10 +487,14 @@ void QueryPlan::buildPlanFragment(ContextPtr context)
     }
 }
 
-void QueryPlan::buildDistributedPlan(ContextMutablePtr context)
+void QueryPlan::buildDistributedPlan(ContextPtr context)
 {
-    if (context->getRunningMode() == Context::RunningMode::STORE)
+    /// Query directly hit on the store node.
+    if (context->isInitialNode() && context->getRunningMode() == Context::RunningMode::STORE)
+    {
+        LOG_DEBUG(log, "Skip building distributed plan.");
         return;
+    }
 
     if (context->getInitialQueryId() == "zzzzzzzz-zzzz-zzzz-zzzz-zzzzzzzzzzzz")
     {
@@ -498,17 +504,8 @@ void QueryPlan::buildDistributedPlan(ContextMutablePtr context)
 
     LOG_DEBUG(log, "Initial query id: {}, to be built to distributed plan.", context->getInitialQueryId());
 
-//    /// For hard code debugging
-//    if (context->getMacros()->getValue("cluster") == "store")
-//    {
-//        auto query_plan_fragment_info
-//            = Context::QueryPlanFragmentInfo{.query_id = "xxx-yyy-zzz", .stage_id = 0, .node_id = "centos0"};
-//        query_plan_fragment_info.sinks = {std::make_shared<String>("ubuntu0")};
-//        context->setQueryPlanFragmentInfo(query_plan_fragment_info);
-//    }
-
     checkInitialized();
-    if (context->isInitialComputeNode())
+    if (context->isInitialNode())
     {
         optimize(QueryPlanOptimizationSettings::fromContext(context));
         buildStages(context);
@@ -525,15 +522,16 @@ String QueryPlan::debugLocalPlanFragment(const String & query_id, int stage_id, 
     WriteBufferFromOwnString buf;
     ExplainPlanOptions options;
     buf << "fragment id: " << query_id << "/" << stage_id << "/" << node_id << "\n";
+    buf << "distributed source " << distributed_source_nodes.size() << " nodes:\n";
     for (const auto node : distributed_source_nodes)
     {
         auto distributed_source_step = dynamic_cast<DistributedSourceStep*>(node->step.get());
-        buf << distributed_source_step->getName() << ": ";
+        buf << distributed_source_step->getName() << ", sources: ";
         for (const auto & source : distributed_source_step->getSources())
             buf << *source << " ";
         buf.write('\n');
     }
-
+    buf << "plan fragment:\n";
     explainPlan(buf, options);
     return buf.str();
 }

@@ -332,8 +332,8 @@ namespace
         CALL_WITH_STREAM_INPUT,  /// ExecuteQueryWithStreamInput() call
         CALL_WITH_STREAM_OUTPUT, /// ExecuteQueryWithStreamOutput() call
         CALL_WITH_STREAM_IO,     /// ExecuteQueryWithStreamIO() call
-        CALL_SEND_SIMPLE,        /// SendDistributedPlanParams() call
-        CALL_FRAGMENT_WITH_STREAM_OUTPUT,  /// ExecuteQueryFragmentWithStreamOutput() call
+        CALL_EXECUTE_PLAN_FRAGMENT,        /// ExecutePlanFragment() call
+        CALL_FETCH_PLAN_FRAGMENT_RESULT,  /// FetchPlanFragmentResult() call
         CALL_MAX,
     };
 
@@ -345,8 +345,8 @@ namespace
             case CALL_WITH_STREAM_INPUT: return "ExecuteQueryWithStreamInput()";
             case CALL_WITH_STREAM_OUTPUT: return "ExecuteQueryWithStreamOutput()";
             case CALL_WITH_STREAM_IO: return "ExecuteQueryWithStreamIO()";
-            case CALL_SEND_SIMPLE: return "SendDistributedPlanParams()";
-            case CALL_FRAGMENT_WITH_STREAM_OUTPUT: return "ExecuteQueryFragmentWithStreamOutput()";
+            case CALL_EXECUTE_PLAN_FRAGMENT: return "ExecutePlanFragment()";
+            case CALL_FETCH_PLAN_FRAGMENT_RESULT: return "FetchPlanFragmentResult()";
             case CALL_MAX: break;
         }
         __builtin_unreachable();
@@ -359,7 +359,7 @@ namespace
 
     bool isOutputStreaming(CallType call_type)
     {
-        return (call_type == CALL_WITH_STREAM_OUTPUT) || (call_type == CALL_WITH_STREAM_IO)  || (call_type == CALL_FRAGMENT_WITH_STREAM_OUTPUT);
+        return (call_type == CALL_WITH_STREAM_OUTPUT) || (call_type == CALL_WITH_STREAM_IO)  || (call_type == CALL_FETCH_PLAN_FRAGMENT_RESULT);
     }
 
     template <enum CallType call_type>
@@ -520,7 +520,7 @@ namespace
     };
 
     template<>
-    class Responder<CALL_SEND_SIMPLE> : public BaseResponder
+    class Responder<CALL_EXECUTE_PLAN_FRAGMENT> : public BaseResponder
     {
     public:
         void start(GRPCService & grpc_service,
@@ -528,7 +528,7 @@ namespace
                    grpc::ServerCompletionQueue & notification_queue,
                    const CompletionCallback & callback) override
         {
-            grpc_service.RequestSendDistributedPlanParams(&grpc_context, &query_info.emplace(), &response_writer, &new_call_queue, &notification_queue, getCallbackPtr(callback));
+            grpc_service.RequestExecutePlanFragment(&grpc_context, &query_info.emplace(), &response_writer, &new_call_queue, &notification_queue, getCallbackPtr(callback));
         }
 
         void read(GRPCQueryInfo & query_info_, const CompletionCallback & callback) override
@@ -561,7 +561,7 @@ namespace
     };
 
     template<>
-    class Responder<CALL_FRAGMENT_WITH_STREAM_OUTPUT> : public BaseResponder
+    class Responder<CALL_FETCH_PLAN_FRAGMENT_RESULT> : public BaseResponder
     {
     public:
         void start(GRPCService & grpc_service,
@@ -569,7 +569,7 @@ namespace
                    grpc::ServerCompletionQueue & notification_queue,
                    const CompletionCallback & callback) override
         {
-            grpc_service.RequestExecuteQueryFragmentWithStreamOutput(&grpc_context, &ticket.emplace(), &writer, &new_call_queue, &notification_queue, getCallbackPtr(callback));
+            grpc_service.RequestFetchPlanFragmentResult(&grpc_context, &ticket.emplace(), &writer, &new_call_queue, &notification_queue, getCallbackPtr(callback));
         }
 
         void read(GRPCQueryInfo &, const CompletionCallback &) override
@@ -609,8 +609,8 @@ namespace
             case CALL_WITH_STREAM_INPUT: return std::make_unique<Responder<CALL_WITH_STREAM_INPUT>>();
             case CALL_WITH_STREAM_OUTPUT: return std::make_unique<Responder<CALL_WITH_STREAM_OUTPUT>>();
             case CALL_WITH_STREAM_IO: return std::make_unique<Responder<CALL_WITH_STREAM_IO>>();
-            case CALL_SEND_SIMPLE: return std::make_unique<Responder<CALL_SEND_SIMPLE>>();
-            case CALL_FRAGMENT_WITH_STREAM_OUTPUT: return std::make_unique<Responder<CALL_FRAGMENT_WITH_STREAM_OUTPUT>>();
+            case CALL_EXECUTE_PLAN_FRAGMENT: return std::make_unique<Responder<CALL_EXECUTE_PLAN_FRAGMENT>>();
+            case CALL_FETCH_PLAN_FRAGMENT_RESULT: return std::make_unique<Responder<CALL_FETCH_PLAN_FRAGMENT_RESULT>>();
             case CALL_MAX: break;
         }
         __builtin_unreachable();
@@ -677,32 +677,170 @@ namespace
     class InnerMap
     {
     public:
-        bool getAndErase(const String & key_, Value & value_)
+        using Impl = std::unordered_map<String, Value>;
+        auto get(const String & key_)
         {
             std::lock_guard<std::mutex> lock(mutex);
             auto it = container.find(key_);
             if (it == container.end())
-                return false;
-            std::swap(it->second, value_);
-            container.erase(it);
-            return true;
+                return std::pair<Value, bool>{{}, false};
+            return std::pair<Value, bool>{it->second, true};
         }
 
-        bool insert(const String& key_, Value && value_)
+        auto insert(const String& key_, Value && value_)
         {
             std::lock_guard<std::mutex> lock(mutex);
-            if (container.find(key_) != container.end())
-                return false;
-            container.emplace(key_, value_);
-            return true;
+            return container.emplace(key_, value_);
         }
 
+        auto erase(const String & key_)
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            return container.erase(key_);
+        }
+
+
     private:
-        std::unordered_map<String, Value> container;
+        Impl container;
         std::mutex mutex;
     };
 
-    using QueryInfoMap = InnerMap<GRPCQueryInfo>;
+    class QueryInfoWrapper
+    {
+    public:
+        enum Status {
+            NORMAL,
+            TIMEOUT,
+            FINISH,
+            CANCEL
+        };
+
+        QueryInfoWrapper(GRPCQueryInfo * query_info_, int consumers_)
+            : query_info(query_info_), consumers(consumers_), blocks(consumers), ready(consumers, false), ready_count(0)
+        {
+        }
+
+        void setWaitTimeoutSeconds(int wait_timeout_seconds_)
+        {
+            if (wait_timeout_seconds_ > 0)
+                wait_timeout_seconds = std::chrono::seconds(wait_timeout_seconds_);
+        }
+
+        void notifyHeader(Block header_);
+        QueryInfoWrapper::Status waitConsume();
+        void notifyReady();
+        void notifyFinish();
+
+        QueryInfoWrapper::Status waitHeader();
+        QueryInfoWrapper::Status waitReadyOrFinish(int index);
+        void notifyProduce();
+
+        GRPCQueryInfo * query_info;
+        int consumers;
+
+        /// Transferred data between producer and consumer.
+        /// Not need to lock when accessing "blocks", because:
+        /// 1. producer will put blocks until all consumers take blocks out, so there is no READ when WRITE.
+        /// 2. consumers could take blocks simultaneously, as it's a vector which supports READ concurrently.
+        Block header;
+        std::vector<Block> blocks;
+        Block totals;
+        Block extremes;
+        ProfileInfo profile_info;
+
+        /// Consumer wait condition.
+        std::mutex mutex_consumer;
+        std::condition_variable cv_consumer;
+        std::vector<bool> ready;
+
+        /// Producer wait condition.
+        std::mutex mutex_producer;
+        std::condition_variable cv_producer;
+        int ready_count;
+
+        std::atomic<bool> finish{false};
+        std::atomic<bool> cancel{false};
+        std::chrono::seconds wait_timeout_seconds{600};
+    };
+
+    void QueryInfoWrapper::notifyHeader(Block header_)
+    {
+        {
+            std::lock_guard<std::mutex> lock(mutex_consumer);
+            header = std::move(header_);
+        }
+        cv_consumer.notify_all();
+    }
+
+    QueryInfoWrapper::Status QueryInfoWrapper::waitConsume()
+    {
+        std::unique_lock<std::mutex> lock(mutex_producer);
+        bool status = cv_producer.wait_for(lock, wait_timeout_seconds, [this] { return ready_count == 0 || cancel; });
+        if (!status)
+        {
+            /// Set cancel if timeout.
+            cancel = true;
+            return Status::CANCEL;
+        }
+        ready_count = consumers;
+        return Status::NORMAL;
+    }
+
+    void QueryInfoWrapper::notifyReady()
+    {
+        {
+            std::lock_guard<std::mutex> lock(mutex_consumer);
+            ready.assign(consumers, true);
+        }
+        cv_consumer.notify_all();
+    }
+
+    void QueryInfoWrapper::notifyFinish()
+    {
+        {
+            std::lock_guard<std::mutex> lock(mutex_consumer);
+            finish = true;
+        }
+        cv_consumer.notify_all();
+    }
+
+    QueryInfoWrapper::Status QueryInfoWrapper::waitHeader()
+    {
+        std::unique_lock<std::mutex> lock(mutex_consumer);
+        bool status = cv_consumer.wait_for(lock, wait_timeout_seconds,[this] { return header == true || cancel; });
+        if (!status)
+            return Status::TIMEOUT;
+        return Status::NORMAL;
+    }
+
+    QueryInfoWrapper::Status QueryInfoWrapper::waitReadyOrFinish(int index)
+    {
+        std::unique_lock<std::mutex> lock(mutex_consumer);
+        bool status = cv_consumer.wait_for(
+            lock, wait_timeout_seconds, [this, index] { return ready[index] || finish || cancel; });
+        if (!status)
+            return Status::TIMEOUT;
+        if (finish)
+            return Status::FINISH;
+        if (cancel)
+            return Status::CANCEL;
+        ready[index] = false;
+        return Status::NORMAL;
+    }
+
+    void QueryInfoWrapper::notifyProduce()
+    {
+        int res = 0;
+        {
+            std::lock_guard<std::mutex> lock(mutex_producer);
+            res = --ready_count;
+        }
+        /// Notify producer only when all blocks are consumed, producer will be waken up once.
+        if (res == 0)
+            cv_producer.notify_one();
+    }
+
+    using QueryInfoMap = InnerMap<std::shared_ptr<QueryInfoWrapper>>;
 
     /// Handles a connection after a responder is started (i.e. after getting a new call).
     class Call
@@ -716,20 +854,24 @@ namespace
     private:
         void run();
 
-        void saveQueryInfo();
-        void runPlanFragment();
-
         void receiveQuery();
         void receiveTicket();
         void executeQuery();
+
+        void storeQueryInfoWrapper();
+        void loadQueryInfoWrapper();
 
         void processInput();
         void initializeBlockInputStream(const Block & header);
         void createExternalTables();
 
         void generateOutput();
+        void produceOutput();
+        void consumeOutput();
 
         void finishQuery();
+        void finishQueryInfo();
+        void finishPipeline();
         void onException(const Exception & exception);
         void onFatalError();
         void releaseQueryIDAndSessionID();
@@ -749,8 +891,6 @@ namespace
         void sendResult();
         void throwIfFailedToSendResult();
         void sendException(const Exception & exception);
-
-        static std::unique_ptr<QueryInfoMap> query_info_map;
 
         const CallType call_type;
         std::unique_ptr<BaseResponder> responder;
@@ -777,6 +917,10 @@ namespace
         GRPCQueryInfo query_info; /// We reuse the same messages multiple times.
         GRPCResult result;
         GRPCTicket ticket;
+
+        static std::unique_ptr<QueryInfoMap> query_info_map;
+        String query_info_key;
+        std::shared_ptr<QueryInfoWrapper> query_info_wrapper;
 
         bool initial_query_info_read = false;
         bool initial_ticket_read = false;
@@ -827,19 +971,11 @@ namespace
 
     void Call::start(const std::function<void(void)> & on_finish_call_callback)
     {
-        void (Call::*function_to_run)() = nullptr;
-        if (call_type == CALL_SEND_SIMPLE)
-            function_to_run = &Call::saveQueryInfo;
-        else if (call_type == CALL_FRAGMENT_WITH_STREAM_OUTPUT)
-            function_to_run = &Call::runPlanFragment;
-        else
-            function_to_run = &Call::run;
-
-        auto runner_function = [this, on_finish_call_callback, function_to_run]
+        auto runner_function = [this, on_finish_call_callback]
         {
             try
             {
-                (this->*function_to_run)();
+                run();
             }
             catch (...)
             {
@@ -854,77 +990,39 @@ namespace
     {
         try
         {
-            setThreadName("GRPCServerCall");
-            receiveQuery();
-            executeQuery();
-            processInput();
-            generateOutput();
-            finishQuery();
-        }
-        catch (Exception & exception)
-        {
-            onException(exception);
-        }
-        catch (Poco::Exception & exception)
-        {
-            onException(Exception{Exception::CreateFromPocoTag{}, exception});
-        }
-        catch (std::exception & exception)
-        {
-            onException(Exception{Exception::CreateFromSTDTag{}, exception});
-        }
-    }
-
-    void Call::saveQueryInfo()
-    {
-        try
-        {
-            setThreadName("GRPCServerCall");
-            receiveQuery();
-            auto query_id = query_info.query_id();
-            auto stage_id = std::to_string(query_info.stage_id());
-            auto sinks = query_info.sinks();
-            /// TODO::Optimize flow
-            for(auto& node_id : sinks)
+            if (call_type == CALL_EXECUTE_PLAN_FRAGMENT)
             {
-                auto plan_fragment_id = query_id + "/" + stage_id + "/" + node_id;
-                LOG_DEBUG(log, "key: {}", plan_fragment_id);
-                auto status = query_info_map->insert(plan_fragment_id, std::move(query_info));
-                if (!status)
-                {
-                    throw Exception("Plan fragment id " + plan_fragment_id + " already exists", ErrorCodes::LOGICAL_ERROR);
-                }
-            }
-            finishQuery();
-        }
-        catch (Exception & exception)
-        {
-            onException(exception);
-        }
-        catch (Poco::Exception & exception)
-        {
-            onException(Exception{Exception::CreateFromPocoTag{}, exception});
-        }
-        catch (std::exception & exception)
-        {
-            onException(Exception{Exception::CreateFromSTDTag{}, exception});
-        }
-    }
+                setThreadName("GRPCServerExecutePlanFragment");
 
-    void Call::runPlanFragment()
-    {
-        try
-        {
-            setThreadName("GRPCServerCall");
-            receiveTicket();
-            auto plan_fragment_id = ticket.query_id() + "/" + std::to_string(ticket.stage_id()) + "/" + ticket.node_id();
-            auto status = query_info_map->getAndErase(plan_fragment_id, query_info);
-            if (!status)
-                throw Exception("Plan fragment id " + plan_fragment_id + " not exists", ErrorCodes::LOGICAL_ERROR);
-            executeQuery();
-            processInput();
-            generateOutput();
-            finishQuery();
+                /// Include two steps:
+                /// 1.Store query info.
+                receiveQuery();
+                storeQueryInfoWrapper();
+                finishQueryInfo();
+
+                /// 2.Build and execute pipeline.
+                executeQuery(); /// Build pipeline.
+                produceOutput(); /// Execute pipeline.
+                finishPipeline();
+            }
+            else if (call_type == CALL_FETCH_PLAN_FRAGMENT_RESULT)
+            {
+                setThreadName("GRPCServerFetchPlanFragmentResult");
+                receiveTicket();
+                loadQueryInfoWrapper();
+                executeQuery();
+                consumeOutput();
+                finishQuery();
+            }
+            else
+            {
+                setThreadName("GRPCServerCall");
+                receiveQuery();
+                executeQuery();
+                processInput();
+                generateOutput();
+                finishQuery();
+            }
         }
         catch (Exception & exception)
         {
@@ -958,11 +1056,16 @@ namespace
 
         readTicket();
 
-        LOG_DEBUG(log, "Received ticket(stream name): {}", ticket.query_id() + "/" + std::to_string(ticket.stage_id()) + "/" + ticket.node_id());
+        LOG_DEBUG(log, "Received ticket: {}", ticket.query_id() + "/" + std::to_string(ticket.stage_id()) + "/" + ticket.node_id());
     }
 
     void Call::executeQuery()
     {
+        /// If this is from fetchPlanFragmentResult(), restore query_info from wrapper,
+        /// and initialize query_context, but don't build pipeline.
+        if (call_type == CALL_FETCH_PLAN_FRAGMENT_RESULT)
+            query_info = *query_info_wrapper->query_info;
+
         /// Retrieve user credentials.
         std::string user = query_info.user_name();
         std::string password = query_info.password();
@@ -990,28 +1093,27 @@ namespace
 
         query_context = session->makeQueryContext();
 
-        auto genQueryPlanFragmentInfo = [](ContextMutablePtr & context_, GRPCQueryInfo & info_)
+        /// Set query plan fragment info
+        if (call_type == CALL_EXECUTE_PLAN_FRAGMENT)
         {
             std::vector<std::shared_ptr<String>> sources, sinks;
-            for (auto & source : info_.sources())
+            for (const auto & source : query_info.sources())
             {
                 sources.emplace_back(std::make_shared<String>(source));
             }
-            for (auto & sink : info_.sinks())
+            for (const auto & sink : query_info.sinks())
             {
                 sinks.emplace_back(std::make_shared<String>(sink));
             }
             Context::QueryPlanFragmentInfo fragmentInfo{
-                .query_id = info_.query_id(),
-                .stage_id = info_.stage_id(),
-                .parent_stage_id = info_.parent_stage_id(),
-                .node_id = info_.node_id(),
+                .query_id = query_info.query_id(),
+                .stage_id = query_info.stage_id(),
+                .parent_stage_id = query_info.parent_stage_id(),
+                .node_id = query_info.node_id(),
                 .sources = sources,
                 .sinks = sinks };
-            context_->setQueryPlanFragmentInfo(std::move(fragmentInfo));
-        };
-
-        genQueryPlanFragmentInfo(query_context, query_info);
+            query_context->setQueryPlanFragmentInfo(std::move(fragmentInfo));
+        }
 
         /// Prepare settings.
         SettingsChanges settings_changes;
@@ -1048,6 +1150,13 @@ namespace
         /// The interactive delay will be used to show progress.
         interactive_delay = settings.interactive_delay;
         query_context->setProgressCallback([this](const Progress & value) { return progress.incrementPiecewiseAtomically(value); });
+
+        if (call_type == CALL_FETCH_PLAN_FRAGMENT_RESULT)
+        {
+            query_context->setDefaultFormat("Native");
+            output_format = "Native";
+            return;
+        }
 
         /// Parse the query.
         query_text = std::move(*(query_info.mutable_query()));
@@ -1113,6 +1222,27 @@ namespace
         }
         String query(begin, query_end);
         io = ::DB::executeQuery(true, query, query_context);
+    }
+
+    void Call::storeQueryInfoWrapper()
+    {
+        query_info_key = query_info.query_id() + "/" + toString(query_info.stage_id());
+        auto res = query_info_map->insert(query_info_key, std::make_shared<QueryInfoWrapper>(&query_info, query_info.sinks_size()));
+        if (!res.second)
+        {
+            throw Exception("Query info key " + query_info_key + " already exists", ErrorCodes::LOGICAL_ERROR);
+        }
+        query_info_wrapper = res.first->second;
+    }
+
+    void Call::loadQueryInfoWrapper()
+    {
+        query_info_key = ticket.query_id() + "/" + std::to_string(ticket.stage_id());
+        auto res = query_info_map->get(query_info_key);
+        if (!res.second)
+            throw Exception("Query info key " + query_info_key + " not exists", ErrorCodes::LOGICAL_ERROR);
+        //query_info = *(res.first->query_info);
+        query_info_wrapper = res.first;
     }
 
     void Call::processInput()
@@ -1433,6 +1563,136 @@ namespace
         output_format_processor->doWriteSuffix();
     }
 
+    void Call::produceOutput()
+    {
+        if (!io.pipeline.initialized() || io.pipeline.pushing())
+            return;
+
+        if (io.pipeline.pulling())
+        {
+            query_info_wrapper->setWaitTimeoutSeconds(query_context->getSettings().max_execution_time.totalSeconds());
+            query_info_wrapper->notifyHeader(io.pipeline.getHeader());
+
+            /// Pull block from pipeline.
+            auto executor = std::make_shared<PullingAsyncPipelineExecutor>(io.pipeline);
+            auto check_for_cancel = [this, &executor] {
+                if (query_info_wrapper->cancel)
+                {
+                    result.set_cancelled(true);
+                    cancelled = true;
+                    LOG_DEBUG(log, "{} producer cancel pipeline executor.", query_info_key);
+                    executor->cancel();
+                    return false;
+                }
+                return true;
+            };
+
+            Block block;
+            while (check_for_cancel())
+            {
+                if (!executor->pull(block, interactive_delay / 1000))
+                    break;
+
+                if (!check_for_cancel())
+                    break;
+
+                if (block && !io.null_format)
+                {
+                    block = materializeBlock(block);
+                    query_info_wrapper->waitConsume();
+                    if (!check_for_cancel())
+                        break;
+                    query_info_wrapper->blocks.assign(query_info_wrapper->consumers, block);
+                    LOG_DEBUG(log, "{} produce {} block(s): {} rows, {} columns, {} bytes.", query_info_key, query_info_wrapper->consumers, block.rows(), block.columns(), block.bytes());
+                    query_info_wrapper->notifyReady();
+                }
+            }
+
+            /// Wait the last produced blocks to be consumed.
+            if (!query_info_wrapper->cancel)
+                query_info_wrapper->waitConsume();
+
+            if (!query_info_wrapper->cancel)
+            {
+                query_info_wrapper->totals = executor->getTotalsBlock();
+                query_info_wrapper->extremes = executor->getExtremesBlock();
+                query_info_wrapper->profile_info = executor->getProfileInfo();
+            }
+            query_info_wrapper->notifyFinish();
+            /// Wait all consumers to finish.
+            query_info_wrapper->waitConsume();
+            LOG_DEBUG(log, "{} producer is {}.", query_info_key, (query_info_wrapper->cancel ? "cancelled" : "done"));
+        }
+    }
+
+    void Call::consumeOutput()
+    {
+        int index = 0;
+        for (; index < query_info_wrapper->query_info->sinks().size(); ++index)
+        {
+            if (query_info_wrapper->query_info->sinks(index) == ticket.node_id())
+                break;
+        }
+
+        while (query_info_wrapper->waitHeader() == QueryInfoWrapper::Status::TIMEOUT);
+
+        write_buffer.emplace(*result.mutable_output());
+        output_format_processor = query_context->getOutputFormat(output_format, *write_buffer, query_info_wrapper->header);
+        output_format_processor->doWritePrefix();
+        Stopwatch after_send_progress;
+
+        /// Unless the input() function is used we are not going to receive input data anymore.
+        if (!input_function_is_used)
+            check_query_info_contains_cancel_only = true;
+
+        Block block;
+        while (!query_info_wrapper->cancel)
+        {
+            auto status = query_info_wrapper->waitReadyOrFinish(index);
+            if (status == QueryInfoWrapper::Status::TIMEOUT)
+                continue;
+            if (query_info_wrapper->finish || query_info_wrapper->cancel)
+                break;
+
+            block = query_info_wrapper->blocks[index];
+            LOG_DEBUG(log, "{}/{} consume 1 block: {} rows, {} columns, {} bytes.", query_info_key, ticket.node_id(), block.rows(), block.columns(), block.bytes());
+            query_info_wrapper->notifyProduce();
+
+            throwIfFailedToSendResult();
+            if (query_info_wrapper->cancel)
+                break;
+
+            if (block && !io.null_format)
+                output_format_processor->write(block);
+
+            if (after_send_progress.elapsedMicroseconds() >= interactive_delay)
+            {
+                addProgressToResult();
+                after_send_progress.restart();
+            }
+
+            addLogsToResult();
+
+            bool has_output = write_buffer->offset();
+            if (has_output || result.has_progress() || result.logs_size())
+                sendResult();
+
+            throwIfFailedToSendResult();
+        }
+
+        if (!query_info_wrapper->cancel)
+        {
+            addTotalsToResult(query_info_wrapper->totals);
+            addExtremesToResult(query_info_wrapper->extremes);
+            addProfileInfoToResult(query_info_wrapper->profile_info);
+        }
+
+        output_format_processor->doWriteSuffix();
+        /// Notify producer that current consumer is finished.
+        query_info_wrapper->notifyProduce();
+        LOG_DEBUG(log, "{}/{} consumer is {}.", query_info_key, ticket.node_id(), (query_info_wrapper->cancel ? "cancelled" : "done"));
+    }
+
     void Call::finishQuery()
     {
         finalize = true;
@@ -1454,6 +1714,35 @@ namespace
             query_time.elapsedSeconds(),
             static_cast<double>(waited_for_client_reading) / 1000000000ULL,
             static_cast<double>(waited_for_client_writing) / 1000000000ULL);
+    }
+
+    void Call::finishQueryInfo()
+    {
+        finalize = true;
+        addProgressToResult();
+        if (query_scope.has_value())
+        {
+            query_scope->logPeakMemoryUsage();
+        }
+        addLogsToResult();
+        releaseQueryIDAndSessionID();
+        sendResult();
+        LOG_INFO(
+            log,
+            "Finished receiving query info in {} secs. (including reading by client: {}, writing by client: {})",
+            query_time.elapsedSeconds(),
+            static_cast<double>(waited_for_client_reading) / 1000000000ULL,
+            static_cast<double>(waited_for_client_writing) / 1000000000ULL);
+    }
+
+    void Call::finishPipeline()
+    {
+        io.onFinish();
+        close();
+        LOG_INFO(
+            log,
+            "Finished executing pipeline of plan fragment {} in {} secs.",
+            query_info_key, query_time.elapsedSeconds());
     }
 
     void Call::onException(const Exception & exception)
@@ -1528,6 +1817,8 @@ namespace
         query_scope.reset();
         query_context.reset();
         session.reset();
+        if (call_type == CALL_EXECUTE_PLAN_FRAGMENT && !query_info_key.empty())
+            query_info_map->erase(query_info_key);
     }
 
     void Call::readQueryInfo()

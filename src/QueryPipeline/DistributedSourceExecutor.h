@@ -30,7 +30,6 @@ private:
     String query_id;
     String node_id;
     int stage_id;
-    GRPCTicket ticket;
     GRPCClient client;
     Poco::Logger * log = nullptr;
     std::atomic<bool> finished{false};
