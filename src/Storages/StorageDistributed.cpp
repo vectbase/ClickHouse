@@ -647,11 +647,11 @@ SinkToStoragePtr StorageDistributed::write(const ASTPtr &, const StorageMetadata
 
     auto shard_num = cluster->getLocalShardCount() + cluster->getRemoteShardCount();
 
-    /// If sharding key is not specified, then you can only write to a shard containing only one shard
-    if (!settings.insert_shard_id && !settings.insert_distributed_one_random_shard && !has_sharding_key && shard_num >= 2)
+    /// Without random and specified shard id are not allow
+    if (!settings.insert_shard_id && !settings.insert_distributed_one_random_shard && shard_num >= 2)
     {
         throw Exception(
-            "Method write is not supported by storage " + getName() + " with more than one shard and no sharding key provided",
+            "Method write is not supported by storage " + getName() + " with more than one shard, no insert_shard_id and insert_distributed_one_random_shard=true provided",
             ErrorCodes::STORAGE_REQUIRES_PARAMETER);
     }
 
@@ -660,8 +660,7 @@ SinkToStoragePtr StorageDistributed::write(const ASTPtr &, const StorageMetadata
         throw Exception("Shard id should be range from 1 to shard number", ErrorCodes::INVALID_SHARD_ID);
     }
 
-    /// Force sync insertion if it is remote() table function
-    bool insert_sync = settings.insert_distributed_sync || settings.insert_shard_id || owned_cluster;
+    bool insert_sync = settings.insert_distributed_sync || owned_cluster;
     auto timeout = settings.insert_distributed_timeout;
 
     Names columns_to_send;
@@ -1242,14 +1241,14 @@ void StorageDistributed::delayInsertOrThrowIfNeeded() const
     if (distributed_settings.bytes_to_delay_insert && total_bytes > distributed_settings.bytes_to_delay_insert)
     {
         /// Step is 5% of the delay and minimal one second.
-        /// NOTE: max_delay_to_insert is in seconds, and step is in ms.
-        const size_t step_ms = std::min<double>(1., double(distributed_settings.max_delay_to_insert) * 1'000 * 0.05);
+        /// NOTE: embedded_max_delay_to_insert is in seconds, and step is in ms.
+        const size_t step_ms = std::min<double>(1., double(distributed_settings.embedded_max_delay_to_insert) * 1'000 * 0.05);
         UInt64 delayed_ms = 0;
 
         do {
             delayed_ms += step_ms;
             std::this_thread::sleep_for(std::chrono::milliseconds(step_ms));
-        } while (*totalBytes(getContext()->getSettingsRef()) > distributed_settings.bytes_to_delay_insert && delayed_ms < distributed_settings.max_delay_to_insert*1000);
+        } while (*totalBytes(getContext()->getSettingsRef()) > distributed_settings.bytes_to_delay_insert && delayed_ms < distributed_settings.embedded_max_delay_to_insert*1000);
 
         ProfileEvents::increment(ProfileEvents::DistributedDelayedInserts);
         ProfileEvents::increment(ProfileEvents::DistributedDelayedInsertsMilliseconds, delayed_ms);
@@ -1344,9 +1343,9 @@ void registerStorageDistributed(StorageFactory & factory)
             distributed_settings.loadFromQuery(*args.storage_def);
         }
 
-        if (distributed_settings.max_delay_to_insert < 1)
+        if (distributed_settings.embedded_max_delay_to_insert < 1)
             throw Exception(ErrorCodes::ARGUMENT_OUT_OF_BOUND,
-                "max_delay_to_insert cannot be less then 1");
+                "embedded_max_delay_to_insert cannot be less then 1");
 
         if (distributed_settings.bytes_to_throw_insert && distributed_settings.bytes_to_delay_insert &&
             distributed_settings.bytes_to_throw_insert <= distributed_settings.bytes_to_delay_insert)
@@ -1385,6 +1384,67 @@ void registerStorageDistributed(StorageFactory & factory)
         .supports_parallel_insert = true,
         .source_access_type = AccessType::REMOTE,
     });
+}
+
+void registerStorageEmbeddedDistributed(StorageFactory & factory)
+{
+    factory.registerStorage(
+        "EmbeddedDistributed",
+        [](const StorageFactory::Arguments & args) {
+            const ContextPtr & context = args.getContext();
+
+            /// TODO: move some arguments from the arguments to the SETTINGS.
+            DistributedSettings distributed_settings;
+
+            if (args.storage_def->settings)
+            {
+                distributed_settings.loadFromQuery(*args.storage_def);
+            }
+
+            if (distributed_settings.embedded_max_delay_to_insert < 1)
+                throw Exception(ErrorCodes::ARGUMENT_OUT_OF_BOUND, "embedded_max_delay_to_insert cannot be less then 1");
+
+            if (distributed_settings.bytes_to_throw_insert && distributed_settings.bytes_to_delay_insert
+                && distributed_settings.bytes_to_throw_insert <= distributed_settings.bytes_to_delay_insert)
+            {
+                throw Exception(
+                    ErrorCodes::ARGUMENT_OUT_OF_BOUND,
+                    "bytes_to_throw_insert cannot be less or equal to bytes_to_delay_insert (since it is handled first)");
+            }
+
+            /// Set default values from the distributed_directory_monitor_* global context settings.
+            if (!distributed_settings.monitor_batch_inserts.changed)
+                distributed_settings.monitor_batch_inserts = context->getSettingsRef().distributed_directory_monitor_batch_inserts;
+            if (!distributed_settings.monitor_split_batch_on_failure.changed)
+                distributed_settings.monitor_split_batch_on_failure
+                    = context->getSettingsRef().distributed_directory_monitor_split_batch_on_failure;
+            if (!distributed_settings.monitor_sleep_time_ms.changed)
+                distributed_settings.monitor_sleep_time_ms
+                    = Poco::Timespan(context->getSettingsRef().distributed_directory_monitor_sleep_time_ms);
+            if (!distributed_settings.monitor_max_sleep_time_ms.changed)
+                distributed_settings.monitor_max_sleep_time_ms
+                    = Poco::Timespan(context->getSettingsRef().distributed_directory_monitor_max_sleep_time_ms);
+
+            return StorageDistributed::create(
+                args.table_id,
+                args.columns,
+                args.constraints,
+                args.comment,
+                args.table_id.database_name,
+                args.table_id.table_name,
+                "store",
+                context,
+                nullptr,
+                "default",
+                args.relative_data_path,
+                distributed_settings,
+                args.attach);
+        },
+        {
+            .supports_settings = true,
+            .supports_parallel_insert = true,
+            .source_access_type = AccessType::REMOTE,
+        });
 }
 
 }

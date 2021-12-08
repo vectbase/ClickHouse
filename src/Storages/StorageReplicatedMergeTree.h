@@ -393,6 +393,8 @@ private:
     ThrottlerPtr replicated_fetches_throttler;
     ThrottlerPtr replicated_sends_throttler;
 
+    StoragePtr embedded_distributed;
+
     template <class Func>
     void foreachCommittedParts(Func && func, bool select_sequential_consistency) const;
 
@@ -743,7 +745,8 @@ protected:
         const MergingParams & merging_params_,
         std::unique_ptr<MergeTreeSettings> settings_,
         bool has_force_restore_data_flag,
-        bool allow_renaming_);
+        bool allow_renaming_,
+        StoragePtr embedded_distributed_);
 };
 
 String getPartNamePossiblyFake(MergeTreeDataFormatVersion format_version, const MergeTreePartInfo & part_info);

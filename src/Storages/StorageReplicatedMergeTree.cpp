@@ -274,7 +274,8 @@ StorageReplicatedMergeTree::StorageReplicatedMergeTree(
     const MergingParams & merging_params_,
     std::unique_ptr<MergeTreeSettings> settings_,
     bool has_force_restore_data_flag,
-    bool allow_renaming_)
+    bool allow_renaming_,
+    StoragePtr embedded_distributed_)
     : MergeTreeData(table_id_,
                     relative_data_path_,
                     metadata_,
@@ -305,6 +306,7 @@ StorageReplicatedMergeTree::StorageReplicatedMergeTree(
     , replicated_fetches_pool_size(getContext()->getSettingsRef().background_fetches_pool_size)
     , replicated_fetches_throttler(std::make_shared<Throttler>(getSettings()->max_replicated_fetches_network_bandwidth, getContext()->getReplicatedFetchesThrottler()))
     , replicated_sends_throttler(std::make_shared<Throttler>(getSettings()->max_replicated_sends_network_bandwidth, getContext()->getReplicatedSendsThrottler()))
+    , embedded_distributed(embedded_distributed_)
 {
     queue_updating_task = getContext()->getSchedulePool().createTask(
         getStorageID().getFullTableName() + " (StorageReplicatedMergeTree::queueUpdatingTask)", [this]{ queueUpdatingTask(); });
@@ -4315,6 +4317,11 @@ void StorageReplicatedMergeTree::assertNotReadonly() const
 
 SinkToStoragePtr StorageReplicatedMergeTree::write(const ASTPtr & /*query*/, const StorageMetadataPtr & metadata_snapshot, ContextPtr local_context)
 {
+    if (getContext()->getRunningMode() == Context::RunningMode::COMPUTE)
+    {
+        return embedded_distributed->write(nullptr, metadata_snapshot, local_context);
+    }
+
     const auto storage_settings_ptr = getSettings();
     assertNotReadonly();
 
@@ -4323,7 +4330,9 @@ SinkToStoragePtr StorageReplicatedMergeTree::write(const ASTPtr & /*query*/, con
 
     // TODO: should we also somehow pass list of columns to deduplicate on to the ReplicatedMergeTreeBlockOutputStream ?
     return std::make_shared<ReplicatedMergeTreeSink>(
-        *this, metadata_snapshot, query_settings.insert_quorum,
+        *this,
+        metadata_snapshot,
+        query_settings.insert_quorum,
         query_settings.insert_quorum_timeout.totalMilliseconds(),
         query_settings.max_partitions_per_insert_block,
         query_settings.insert_quorum_parallel,

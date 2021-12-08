@@ -792,6 +792,11 @@ static StoragePtr create(const StorageFactory::Arguments & args)
     if (arg_num != arg_cnt)
         throw Exception("Wrong number of engine arguments.", ErrorCodes::BAD_ARGUMENTS);
 
+    StoragePtr embedded_distributed;
+    if (args.getContext()->getRunningMode() == Context::RunningMode::COMPUTE) {
+        embedded_distributed = StorageFactory::instance().getAllStorages().at("EmbeddedDistributed").creator_fn(args);
+    }
+
     if (replicated)
         return StorageReplicatedMergeTree::create(
             zookeeper_path,
@@ -805,7 +810,8 @@ static StoragePtr create(const StorageFactory::Arguments & args)
             merging_params,
             std::move(storage_settings),
             args.has_force_restore_data_flag,
-            allow_renaming);
+            allow_renaming,
+            embedded_distributed);
     else
         return StorageMergeTree::create(
             args.table_id,

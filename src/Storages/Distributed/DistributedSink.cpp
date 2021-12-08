@@ -133,7 +133,7 @@ DistributedSink::DistributedSink(
     if (settings.max_distributed_depth && context->getClientInfo().distributed_depth > settings.max_distributed_depth)
         throw Exception("Maximum distributed depth exceeded", ErrorCodes::TOO_LARGE_DISTRIBUTED_DEPTH);
     context->getClientInfo().distributed_depth += 1;
-    random_shard_insert = settings.insert_distributed_one_random_shard && !storage.has_sharding_key;
+    random_shard_insert = settings.insert_distributed_one_random_shard;
 }
 
 
@@ -168,20 +168,23 @@ Block DistributedSink::removeSuperfluousColumns(Block block) const
 
 void DistributedSink::writeAsync(const Block & block)
 {
+    const Settings & settings = context->getSettingsRef();
+
+    if (settings.insert_shard_id)
+    {
+        writeAsyncImpl(block, settings.insert_shard_id - 1);
+        ++inserted_blocks;
+        return;
+    }
+
     if (random_shard_insert)
     {
         writeAsyncImpl(block, storage.getRandomShardIndex(cluster->getShardsInfo()));
         ++inserted_blocks;
+        return;
     }
-    else
-    {
 
-        if (storage.getShardingKeyExpr() && (cluster->getShardsInfo().size() > 1))
-            return writeSplitAsync(block);
-
-        writeAsyncImpl(block);
-        ++inserted_blocks;
-    }
+    LOG_WARNING(log, "Could not be happened, settings without insert_shard_id and random_shard_insert");
 }
 
 
@@ -453,7 +456,7 @@ void DistributedSink::writeSync(const Block & block)
 
     watch_current_block.restart();
 
-    if (random_shard_insert)
+    if (!settings.insert_shard_id && random_shard_insert)
     {
         start = storage.getRandomShardIndex(shards_info);
         end = start + 1;
@@ -655,7 +658,7 @@ void DistributedSink::writeToShard(const Block & block, const std::vector<std::s
     const auto & settings = context->getSettingsRef();
     const auto & distributed_settings = storage.getDistributedSettingsRef();
 
-    bool fsync = distributed_settings.fsync_after_insert;
+    bool fsync = distributed_settings.embedded_fsync_after_insert;
     bool dir_fsync = distributed_settings.fsync_directories;
 
     std::string compression_method = Poco::toUpper(settings.network_compression_method.toString());
