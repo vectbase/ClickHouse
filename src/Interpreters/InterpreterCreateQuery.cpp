@@ -1324,7 +1324,7 @@ BlockIO InterpreterCreateQuery::execute()
             }
 
         }
-        create.cluster = CLUSTER_TYPE_STORE;
+        create.cluster = getContext()->getRunningMode() == Context::RunningMode::COMPUTE ? CLUSTER_TYPE_COMPUTE : CLUSTER_TYPE_STORE;
         prepareOnClusterQuery(create, getContext(), create.cluster);
         ASTCreateQuery create_tmp = {create};
         String meta_info;
@@ -1368,8 +1368,7 @@ BlockIO InterpreterCreateQuery::execute()
         /// All cluster to execute
         create.cluster = CLUSTER_TYPE_ALL;
         LOG_DEBUG(log, "DDL query on cluster: {}, create {}.{}", create.cluster, create.database, create.table);
-        executeDDLQueryOnCluster(query_ptr, getContext(), getRequiredAccess(), path, meta_info);
-        return {};
+        return executeDDLQueryOnCluster(query_ptr, getContext(), getRequiredAccess(), path, meta_info);
     }
     if (!create.cluster.empty())
     {

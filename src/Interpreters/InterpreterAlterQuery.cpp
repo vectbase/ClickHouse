@@ -134,6 +134,11 @@ BlockIO InterpreterAlterQuery::executeToTable(const ASTAlterQuery & alter)
 
     if (!mutation_commands.empty())
     {
+        if (alter.is_initial)
+        {
+            const_cast<ASTAlterQuery &>(alter).cluster = CLUSTER_TYPE_STORE;
+            return executeDDLQueryOnCluster(query_ptr, getContext(), getRequiredAccess());
+        }
         table->checkMutationIsPossible(mutation_commands, getContext()->getSettingsRef());
         MutationsInterpreter(table, metadata_snapshot, mutation_commands, getContext(), false).validate();
         table->mutate(mutation_commands, getContext());
@@ -141,6 +146,11 @@ BlockIO InterpreterAlterQuery::executeToTable(const ASTAlterQuery & alter)
 
     if (!partition_commands.empty())
     {
+        if (alter.is_initial)
+        {
+            const_cast<ASTAlterQuery &>(alter).cluster = CLUSTER_TYPE_STORE;
+            return executeDDLQueryOnCluster(query_ptr, getContext(), getRequiredAccess());
+        }
         table->checkAlterPartitionIsPossible(partition_commands, metadata_snapshot, getContext()->getSettingsRef());
         auto partition_commands_pipe = table->alterPartition(metadata_snapshot, partition_commands, getContext());
         if (!partition_commands_pipe.empty())
@@ -204,9 +214,8 @@ BlockIO InterpreterAlterQuery::executeToTable(const ASTAlterQuery & alter)
             };
             String meta_info = formatAlterCommandsToSql(zookeeper->get(path), getContext(), alter_commands);
             const_cast<ASTAlterQuery &>(alter).cluster = CLUSTER_TYPE_ALL;
-            executeDDLQueryOnCluster(query_ptr, getContext(), getRequiredAccess(), path, meta_info);
+            return executeDDLQueryOnCluster(query_ptr, getContext(), getRequiredAccess(), path, meta_info);
         }
-        return {};
     }
 
     if (!alter_commands.empty())

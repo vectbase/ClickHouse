@@ -77,8 +77,13 @@ BlockIO InterpreterDropQuery::execute()
                 return {};
         }
         drop.cluster = CLUSTER_TYPE_ALL;
-        executeDDLQueryOnCluster(query_ptr, getContext(), getRequiredAccessForDDLOnCluster(), path, "");
-        return {};
+        drop.no_delay = true;
+        if (drop.kind == ASTDropQuery::Kind::Truncate)
+        {
+            drop.cluster = CLUSTER_TYPE_STORE;
+            path = "";
+        }
+        return executeDDLQueryOnCluster(query_ptr, getContext(), getRequiredAccessForDDLOnCluster(), path, "");
     }
     if (!drop.cluster.empty())
         return executeDDLQueryOnCluster(query_ptr, getContext(), getRequiredAccessForDDLOnCluster());

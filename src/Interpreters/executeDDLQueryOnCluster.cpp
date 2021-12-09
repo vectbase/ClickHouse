@@ -85,11 +85,11 @@ BlockIO executeDDLQueryOnCluster(const ASTPtr & query_ptr_, ContextPtr context, 
         }
     }
 
-    bool is_all_cluster = query->cluster == CLUSTER_TYPE_ALL;
+    bool is_reserved_cluster = query->cluster == CLUSTER_TYPE_ALL || query->cluster == CLUSTER_TYPE_STORE || query->cluster == CLUSTER_TYPE_COMPUTE;
     DDLWorker & ddl_worker = context->getDDLWorker();
     std::vector<HostID> hosts;
     Cluster::AddressesWithFailover shards;
-    if (!is_all_cluster)
+    if (!is_reserved_cluster)
     {
         query->cluster = context->getMacros()->expand(query->cluster);
         ClusterPtr cluster = context->getCluster(query->cluster);
@@ -103,22 +103,14 @@ BlockIO executeDDLQueryOnCluster(const ASTPtr & query_ptr_, ContextPtr context, 
     }
     else
     {
-        if (meta_path.empty())
-            throw Exception("Empty meta path in a distributed DDL task", ErrorCodes::LOGICAL_ERROR);
         /// Get Hosts from meta service
-        auto getHostsFromMetaService = [&context](std::vector<HostID>& hosts){
-            auto zookeeper = context->getZooKeeper();
-            auto clusters_path = DEFAULT_ZOOKEEPER_CLUSTERS_PATH;
-            Strings children = zookeeper->getChildren(clusters_path);
-            for(auto& child: children)
+        auto getHostsFromMetaService = [&context, &query](std::vector<HostID>& hosts){
+            std::unordered_map<String, ClustersWatcher::ReplicaInfoPtr> replicas = context->getClustersWatcher().getContainer();
+            for (const auto & replica : replicas)
             {
-                auto host_port_str = zookeeper->get(fs::path(clusters_path) / child);
-                auto pos = host_port_str.find(':');
-                if (pos == std::string::npos)
-                    continue;
-                auto host = host_port_str.substr(0, pos);
-                HostID hostId(host, context->getTCPPort());
-                hosts.emplace_back(std::move(hostId));
+                const auto & replica_info = replica.second;
+                if (query->cluster == CLUSTER_TYPE_ALL || (query->cluster == replica_info->type))
+                    hosts.emplace_back(HostID(replica_info->name, context->getTCPPort()));
             }
         };
         getHostsFromMetaService(hosts);
@@ -137,7 +129,7 @@ BlockIO executeDDLQueryOnCluster(const ASTPtr & query_ptr_, ContextPtr context, 
     bool use_local_default_database = false;
     const String & current_database = context->getCurrentDatabase();
 
-    if (!is_all_cluster && need_replace_current_database)
+    if (!is_reserved_cluster && need_replace_current_database)
     {
         Strings shard_default_databases;
         for (const auto & shard : shards)
