@@ -298,7 +298,7 @@ private:
 public:
     struct QueryPlanFragmentInfo
     {
-        String query_id;
+        String initial_query_id;
         int stage_id;   /// Stage that should be executed on this replica.
         int parent_stage_id;
         String node_id; /// This is myself replica name and grpc port.
@@ -538,6 +538,7 @@ public:
     /// exists because it should be set before databases loading.
     void setCurrentDatabaseNameInGlobalContext(const String & name);
     void setCurrentQueryId(const String & query_id);
+    String generateQueryId() const;
 
     void killCurrentQuery();
 

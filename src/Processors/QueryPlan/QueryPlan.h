@@ -3,7 +3,6 @@
 #include <Core/Names.h>
 #include <Interpreters/Context_fwd.h>
 #include <Columns/IColumn.h>
-#include <Processors/QueryPlan/DistributedSourceStep.h>
 
 #include <list>
 #include <memory>
@@ -27,6 +26,9 @@ class QueryPlan;
 using QueryPlanPtr = std::unique_ptr<QueryPlan>;
 
 class Pipe;
+
+class SortingStep;
+class LimitStep;
 
 struct QueryPlanOptimizationSettings;
 struct BuildQueryPipelineSettings;
@@ -58,6 +60,7 @@ public:
     void optimize(const QueryPlanOptimizationSettings & optimization_settings);
 
     void reset();
+
     void buildStages(ContextPtr context);       /// Used by initial node.
     void scheduleStages(ContextPtr context);    /// Used by initial node.
     void buildPlanFragment(ContextPtr context); /// Used by non-initial nodes.
@@ -107,19 +110,20 @@ public:
     {
         QueryPlanStepPtr step;
         std::vector<Node *> children = {};
+        Node * parent = nullptr;
     };
 
     using Nodes = std::list<Node>;
 
     struct Stage
     {
-        int id;
+        int id; /// Current stage id.
         std::vector<Stage *> parents = {}; /// Previous stages that current stage directly depends on.
         Stage * child = nullptr;
-        std::vector<std::shared_ptr<String>> executors; /// Replicas that current stage should be executed on.
+        std::vector<std::shared_ptr<String>> workers; /// Replicas that current stage should be executed on.
         std::vector<std::shared_ptr<String>> sources; /// Parents' executors.
         std::vector<std::shared_ptr<String>> sinks; /// Child's executors.
-        Node * node; /// Current stage's root node
+        Node * node; /// Current stage's root node.
     };
 
     /// Note: do not use vector, otherwise pointers to elements in it will be invalidated when vector increases.
@@ -136,8 +140,16 @@ public:
     };
     using PlanFragmentInfoPtr = std::shared_ptr<PlanFragmentInfo>;
 
+    struct CheckShuffleResult
+    {
+        bool is_shuffle = false;
+        SortingStep * child_sorting_step = nullptr;
+        LimitStep * current_limit_step = nullptr;
+        LimitStep * child_limit_step = nullptr;
+    };
+    void checkShuffle(Node * current_node, Node * child_node, CheckShuffleResult & result);
     String debugLocalPlanFragment(const String & query_id, int stage_id, const String & node_id, const std::vector<Node *> distributed_source_nodes);
-    String debugRemotePlanFragment(const String & receiver, const String & query_id, const Stage * stage);
+    String debugRemotePlanFragment(const String & query, const String & receiver, const String & query_id, const Stage * stage);
 
 private:
     Nodes nodes;

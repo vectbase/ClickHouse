@@ -16,6 +16,17 @@ public:
         bool with_ties_ = false, /// Limit with ties.
         SortDescription description_ = {});
 
+    LimitStep(const DataStream & input_stream_, const LimitStep & limit_step)
+        : LimitStep(
+            input_stream_,
+            limit_step.limit,
+            limit_step.offset,
+            limit_step.always_read_till_end,
+            limit_step.with_ties,
+            limit_step.description)
+    {
+    }
+
     String getName() const override { return "Limit"; }
 
     void transformPipeline(QueryPipelineBuilder & pipeline, const BuildQueryPipelineSettings &) override;

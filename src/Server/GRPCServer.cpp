@@ -1109,7 +1109,7 @@ namespace
 
         readTicket();
 
-        LOG_DEBUG(log, "Received ticket: {}", ticket.query_id() + "/" + std::to_string(ticket.stage_id()) + "/" + ticket.node_id());
+        LOG_DEBUG(log, "Received ticket: {}", ticket.initial_query_id() + "/" + std::to_string(ticket.stage_id()) + "/" + ticket.node_id());
     }
 
     void Call::executeQuery()
@@ -1166,7 +1166,7 @@ namespace
                 sinks.emplace_back(std::make_shared<String>(sink));
             }
             Context::QueryPlanFragmentInfo fragmentInfo{
-                .query_id = query_info.query_id(),
+                .initial_query_id = query_info.initial_query_id(),
                 .stage_id = query_info.stage_id(),
                 .parent_stage_id = query_info.parent_stage_id(),
                 .node_id = query_info.node_id(),
@@ -1184,6 +1184,8 @@ namespace
         query_context->checkSettingsConstraints(settings_changes);
         query_context->applySettingsChanges(settings_changes);
 
+        query_context->getClientInfo().query_kind = ClientInfo::QueryKind(query_info.query_kind());
+        query_context->getClientInfo().initial_query_id = query_info.initial_query_id();
         query_context->setCurrentQueryId(query_info.query_id());
         query_scope.emplace(query_context);
 
@@ -1286,7 +1288,7 @@ namespace
 
     void Call::storeQueryInfoWrapper()
     {
-        query_info_key = query_info.query_id() + "/" + toString(query_info.stage_id());
+        query_info_key = query_info.initial_query_id() + "/" + toString(query_info.stage_id());
         auto res = query_info_map->insert(query_info_key, std::make_shared<QueryInfoWrapper>(&query_info, query_info.sinks_size()));
         if (!res.second)
         {
@@ -1297,11 +1299,10 @@ namespace
 
     void Call::loadQueryInfoWrapper()
     {
-        query_info_key = ticket.query_id() + "/" + std::to_string(ticket.stage_id());
+        query_info_key = ticket.initial_query_id() + "/" + std::to_string(ticket.stage_id());
         auto res = query_info_map->get(query_info_key);
         if (!res.second)
             throw Exception("Query info key " + query_info_key + " not exists", ErrorCodes::LOGICAL_ERROR);
-        //query_info = *(res.first->query_info);
         query_info_wrapper = res.first;
     }
 

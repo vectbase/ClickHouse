@@ -1260,6 +1260,34 @@ void Context::setCurrentQueryId(const String & query_id)
         client_info.initial_query_id = client_info.current_query_id;
 }
 
+String Context::generateQueryId() const
+{
+    /// Generate random UUID, but using lower quality RNG,
+    ///  because Poco::UUIDGenerator::generateRandom method is using /dev/random, that is very expensive.
+    /// NOTE: Actually we don't need to use UUIDs for query identifiers.
+    /// We could use any suitable string instead.
+    union
+    {
+        char bytes[16];
+        struct
+        {
+            UInt64 a;
+            UInt64 b;
+        } words;
+        UUID uuid{};
+    } random;
+
+    random.words.a = thread_local_rng(); //-V656
+    random.words.b = thread_local_rng(); //-V656
+
+    /// Use protected constructor.
+    struct QueryUUID : Poco::UUID
+    {
+        QueryUUID(const char * bytes, Poco::UUID::Version version) : Poco::UUID(bytes, version) { }
+    };
+    return QueryUUID(random.bytes, Poco::UUID::UUID_RANDOM).toString();
+}
+
 void Context::killCurrentQuery()
 {
     if (process_list_elem)

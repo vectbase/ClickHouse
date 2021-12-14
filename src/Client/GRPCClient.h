@@ -30,7 +30,7 @@ public:
     ~GRPCClient() = default;
 
     /// Send params of plan fragment to remote, and execute it.
-    GRPCResult executePlanFragment(GRPCQueryInfo & g_query_info);
+    GRPCResult executePlanFragment(const GRPCQueryInfo & query_info);
 
     /// Initialize reader and inner context.
     void prepareRead(const GRPCTicket & ticket_);

@@ -63,7 +63,7 @@ message Compression {
 message Ticket
 {
    // same as QueryInfo.query_id
-   string query_id = 1;
+   string initial_query_id = 1;
    int32 stage_id = 2;
    string node_id = 3;
 }
@@ -110,15 +110,16 @@ message QueryInfo {
    /// If not set the compression settings from the configuration file will be used.
    Compression result_compression = 17;
 
-   /// the stage id of target host which receives this request
-   int32 stage_id = 18;
-   /// the id of the target host
-   string node_id = 19;
+   uint32 query_kind = 18;
+   /// Below are used in distributed plan execution.
+   string initial_query_id = 19;
+   int32 stage_id = 20;
+   string node_id = 21;
    /// TODO use map to represent the relation between source and parent stage id
-   int32 parent_stage_id = 20;
-   repeated string sources = 21;
-   /// replica_name:grpc_port of sinks
-   repeated string sinks = 22;
+   int32 parent_stage_id = 22;
+   repeated string sources = 23;
+   /// Format is "replica_name:grpc_port"
+   repeated string sinks = 24;
 }
 
 enum LogsLevel {

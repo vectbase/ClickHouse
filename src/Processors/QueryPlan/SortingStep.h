@@ -39,6 +39,9 @@ public:
         size_t max_block_size_,
         UInt64 limit_ = 0);
 
+    SortingStep(const DataStream & input_stream_, const SortingStep & sorting_step)
+        : SortingStep(input_stream_, sorting_step.result_description, sorting_step.max_block_size, sorting_step.limit){}
+
     String getName() const override { return "Sorting"; }
 
     void transformPipeline(QueryPipelineBuilder & pipeline, const BuildQueryPipelineSettings &) override;

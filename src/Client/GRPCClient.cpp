@@ -34,14 +34,12 @@ GRPCClient::GRPCClient(const String & addr_)
     log = &Poco::Logger::get("GRPCClient(" + addr + ")");
 }
 
-GRPCResult GRPCClient::executePlanFragment(GRPCQueryInfo & query_info)
+GRPCResult GRPCClient::executePlanFragment(const GRPCQueryInfo & query_info)
 {
     auto ch = grpc::CreateChannel(addr, grpc::InsecureChannelCredentials());
     auto stub = clickhouse::grpc::ClickHouse::NewStub(ch);
     grpc::ClientContext ctx;
     GRPCResult result;
-    /// Set to native format, cause we decode result by NativeReader in the read function
-    query_info.set_output_format("Native");
     grpc::Status status = stub->ExecutePlanFragment(&ctx, query_info, &result);
 
     if (status.ok())
@@ -49,7 +47,11 @@ GRPCResult GRPCClient::executePlanFragment(GRPCQueryInfo & query_info)
     else
     {
         LOG_ERROR(
-            log, "Send query info to {} failed, code: {}, plan fragment id: {}.", addr, status.error_code(), query_info.query_id() + toString(query_info.stage_id()) + query_info.node_id());
+            log,
+            "Send query info to {} failed, code: {}, plan fragment id: {}.",
+            addr,
+            status.error_code(),
+            query_info.initial_query_id() + toString(query_info.stage_id()) + query_info.node_id());
         throw Exception(status.error_message() + ", " + result.exception().display_text(), ErrorCodes::INVALID_GRPC_QUERY_INFO, true);
     }
 }
@@ -74,7 +76,12 @@ Block GRPCClient::read()
     {
         if (result.exception().code() != 0)
         {
-            LOG_ERROR(log, "Read from {} failed, exception.code: {}, exception.text: {}.", addr, result.exception().code(), result.exception().display_text());
+            LOG_ERROR(
+                log,
+                "Read from {} failed, exception.code: {}, exception.text: {}.",
+                addr,
+                result.exception().code(),
+                result.exception().display_text());
             throw Exception(result.exception().display_text(), ErrorCodes::INVALID_GRPC_QUERY_INFO, true);
         }
 
@@ -88,7 +95,10 @@ Block GRPCClient::read()
         return block;
     }
 
-    throw Exception("Read from grpc server " + addr + "failed, " + toString(result.exception().code()) + ", " + result.exception().display_text(), ErrorCodes::GRPC_READ_ERROR, true);
+    throw Exception(
+        "Read from grpc server " + addr + "failed, " + toString(result.exception().code()) + ", " + result.exception().display_text(),
+        ErrorCodes::GRPC_READ_ERROR,
+        true);
 }
 
 void GRPCClient::cancel()
