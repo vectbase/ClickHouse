@@ -121,8 +121,7 @@ public:
         std::vector<Stage *> parents = {}; /// Previous stages that current stage directly depends on.
         Stage * child = nullptr;
         std::vector<std::shared_ptr<String>> workers; /// Replicas that current stage should be executed on.
-        std::vector<std::shared_ptr<String>> sources; /// Parents' executors.
-        std::vector<std::shared_ptr<String>> sinks; /// Child's executors.
+        std::vector<std::shared_ptr<String>> sinks; /// Child's workers.
         Node * node; /// Current stage's root node.
     };
 

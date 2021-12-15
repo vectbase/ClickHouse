@@ -270,22 +270,7 @@ void QueryPlan::scheduleStages(ContextPtr context)
     }
     LOG_DEBUG(log, "{} store, {} compute.", store_replicas.size(), compute_replicas.size());
 
-    /// Fill sources.
-    auto fillSources = [](Stage * stage)
-    {
-        int num_sources = 0;
-        for (Stage * parent : stage->parents)
-        {
-            num_sources += parent->workers.size();
-        }
-        stage->sources.reserve(num_sources);
-        for (Stage * parent : stage->parents)
-        {
-            stage->sources.insert(stage->sources.end(), parent->workers.begin(), parent->workers.end());
-        }
-    };
-
-    auto fillStage = [&store_replicas, &compute_replicas, this, &my_replica, fillSources](Stage * stage)
+    auto fillStage = [&store_replicas, &compute_replicas, this, &my_replica](Stage * stage)
     {
         /// Leaf stage.
         if (stage->parents.empty())
@@ -301,28 +286,25 @@ void QueryPlan::scheduleStages(ContextPtr context)
         if (stage == result_stage)
         {
             stage->workers.emplace_back(std::make_shared<String>(my_replica));
-            /// Optimize: the result stage has one single source and its parent is not leaf stage,
+            /// Optimize:
+            /// the result stage has only one parent worker and its parent stage is not leaf stage,
             /// place its parent stage on the same worker as result stage.
-            if (stage->parents.size() == 1 && stage->sources.size() == 1 && !stage->parents[0]->sources.empty())
+            if (stage->parents.size() == 1)
             {
                 auto * parent = stage->parents.front();
-                parent->workers.front() = stage->workers.front();
-                stage->sources.front() = parent->workers.front();
+                if (parent->workers.size() == 1 && !parent->parents.empty())
+                    parent->workers.front() = stage->workers.front();
 
                 /// Another solution: merge result stage into its parent stage.
                 //LOG_DEBUG(log, "Result stage {} moves forward to parent stage {}.", result_stage->id, result_stage->parents[0]->id);
                 //result_stage = result_stage->parents[0];
             }
-            else
-                fillSources(stage);
-
             return;
         }
 
         /// Intermediate stage.
         stage->workers.reserve(compute_replicas.size());
         stage->workers.insert(stage->workers.end(), compute_replicas.begin(), compute_replicas.end());
-        fillSources(stage);
     };
 
     struct Frame
@@ -369,36 +351,44 @@ void QueryPlan::scheduleStages(ContextPtr context)
         if (&stage == result_stage)
         {
             assert(!result_stage->parents.empty());
-            Block header;
-            const Stage * parent_stage = result_stage->parents[0];
-            const Node * parent_stage_node = result_stage->parents[0]->node;
-            if (!parent_stage_node->step)
-                LOG_DEBUG(log, "Step of parent stage's node is empty.");
-            else if (!parent_stage_node->step->hasOutputStream())
-                LOG_DEBUG(log, "Step of parent stage's node doesn't have output stream.");
-            else if (!parent_stage_node->step->getOutputStream().header)
-                LOG_DEBUG(log, "Step of parent stage's node has empty header.");
-            else
-            {
-                header = parent_stage_node->step->getOutputStream().header;
-                LOG_DEBUG(
-                    log,
-                    "Take the output stream header of {}: {}, header columns: {}.",
-                    parent_stage_node->step->getName(),
-                    parent_stage_node->step->getStepDescription(),
-                    header.columns());
-            }
+            /// Clear query plan tree.
+            root = nullptr;
 
-            auto distributed_source_step = std::make_unique<DistributedSourceStep>(
-                header, parent_stage->workers, initial_query_id, result_stage->id, parent_stage->id, *result_stage->workers.front(), context);
-            reset();
-            addStep(std::move(distributed_source_step));
+            for (const auto parent_stage : result_stage->parents)
+            {
+                Block header;
+                const Node * parent_stage_node = parent_stage->node;
+                if (!parent_stage_node->step->getOutputStream().header)
+                    LOG_ERROR(log, "Step of parent stage's node has empty header.");
+                else
+                {
+                    header = parent_stage_node->step->getOutputStream().header;
+                    LOG_DEBUG(
+                        log,
+                        "Take the output stream header of {}: {}, header columns: {}.",
+                        parent_stage_node->step->getName(),
+                        parent_stage_node->step->getStepDescription(),
+                        header.columns());
+                }
+
+                auto distributed_source_step = std::make_unique<DistributedSourceStep>(
+                    header,
+                    parent_stage->workers,
+                    initial_query_id,
+                    result_stage->id,
+                    parent_stage->id,
+                    *result_stage->workers.front(),
+                    context);
+                /// TODO: improve to support adding multiple distributed_source_step.
+                addStep(std::move(distributed_source_step));
+            }
             {
                 /// Only for debug.
                 LOG_DEBUG(
                     log,
                     "Local plan fragment:\n{}",
-                    debugLocalPlanFragment(initial_query_id, result_stage->id, *result_stage->workers.front(), std::vector<Node *>{root}));
+                    debugLocalPlanFragment(
+                        initial_query_id, result_stage->id, *result_stage->workers.front(), std::vector<Node *>{root}));
             }
             continue;
         }
@@ -422,14 +412,12 @@ void QueryPlan::scheduleStages(ContextPtr context)
         query_info.set_query_id(context->generateQueryId());
         query_info.set_initial_query_id(initial_query_id);
         query_info.set_stage_id(stage.id);
-        if (!stage.parents.empty())
-            query_info.set_parent_stage_id(stage.parents[0]->id);
-        else
-            query_info.set_parent_stage_id(-1);
-
-        for (const auto & source : stage.sources)
+        for (const auto parent : stage.parents)
         {
-            query_info.add_sources(*source);
+            clickhouse::grpc::MapEntry entry;
+            for (const auto & source : parent->workers)
+                entry.add_sources(*source);
+            (*query_info.mutable_parent_sources())[parent->id] = entry;
         }
         for (const auto & sink : stage.sinks)
         {
@@ -454,9 +442,9 @@ void QueryPlan::buildPlanFragment(ContextPtr context)
     int my_stage_id = query_distributed_plan_info.stage_id;
     LOG_DEBUG(
         log,
-        "Build plan fragment: stage {} parent stage {}.",
+        "Build plan fragment: stage {}, has {} parent stages.",
         my_stage_id,
-        query_distributed_plan_info.parent_stage_id);
+        query_distributed_plan_info.parent_sources.size());
 
     /// Get my replica grpc address
     String my_replica = context->getMacros()->getValue("replica") + ":" + toString(context->getServerPort("grpc_port"));
@@ -491,12 +479,14 @@ void QueryPlan::buildPlanFragment(ContextPtr context)
             {
                 ++stage_id;
                 /// Add a DistributedSourceStep between current node and child node.
-                if (stage_id == query_distributed_plan_info.parent_stage_id) /// TODO: if(query_distributed_plan_info.parent_id_to_sources.contains(stage_id))
+                const auto & it = query_distributed_plan_info.parent_sources.find(stage_id);
+                if (it != query_distributed_plan_info.parent_sources.end())
                 {
                     assert(child_node == frame.node->children[frame.visited_children]);
 
                     auto addStep = [this, &stage_id](QueryPlanStepPtr step, const String & description, Node * & node)
                     {
+                        LOG_DEBUG(log, "Add step: {}, parent stage: {}", step->getName(), stage_id);
                         step->setStepDescription(description);
                         if (!node)
                             nodes.emplace_back(Node{.step = std::move(step)});
@@ -506,15 +496,13 @@ void QueryPlan::buildPlanFragment(ContextPtr context)
                             node->parent = &nodes.back();
                         }
                         node = &nodes.back();
-                        LOG_DEBUG(log, "Add step: {}, parent stage: {}", step->getName(), stage_id);
                     };
 
                     /// Create DistributedSourceStep.
                     const auto & header = child_node->step->getOutputStream().header;
-                    const auto & sources
-                        = query_distributed_plan_info.sources; // TODO: query_distributed_plan_info.parent_id_to_sources[stage_id];
-                    auto distributed_source_step
-                        = std::make_unique<DistributedSourceStep>(header, sources, query_distributed_plan_info.initial_query_id, my_stage_id, stage_id, my_replica, context);
+                    const auto & sources = it->second;
+                    auto distributed_source_step = std::make_unique<DistributedSourceStep>(
+                        header, sources, query_distributed_plan_info.initial_query_id, my_stage_id, stage_id, my_replica, context);
                     Node * new_node = nullptr;
                     addStep(std::move(distributed_source_step), "", new_node);
                     distributed_source_nodes.emplace_back(new_node); /// For debug
@@ -645,22 +633,24 @@ String QueryPlan::debugLocalPlanFragment(const String & query_id, int stage_id, 
     return buf.str();
 }
 
-String QueryPlan::debugRemotePlanFragment(const String & query, const String & receiver, const String & query_id, const Stage * stage)
+String QueryPlan::debugRemotePlanFragment(const String & query, const String & worker, const String & query_id, const Stage * stage)
 {
     WriteBufferFromOwnString buf;
     buf << "------ Remote Plan Fragment ------\n";
     buf << "Query: " << query;
     buf.write('\n');
-    buf << "Receiver: " << receiver;
+    buf << "Worker: " << worker;
     buf.write('\n');
-    buf << "Fragment ID: " << query_id << "/" << stage->id << "/" << receiver;
+    buf << "Fragment ID: " << query_id << "/" << stage->id << "/" << worker;
     buf.write('\n');
-    buf << "Sources: ";
-    for (const auto & source : stage->sources)
+    buf << "Sources:\n";
+    for (const auto parent : stage->parents)
     {
-        buf << *source << " ";
+        buf << "  parent stage id: " << parent->id << ", sources: ";
+        for (const auto & source : parent->workers)
+            buf << *source << " ";
+        buf.write('\n');
     }
-    buf.write('\n');
     buf << "Sinks: ";
     for (const auto & sink : stage->sinks)
     {

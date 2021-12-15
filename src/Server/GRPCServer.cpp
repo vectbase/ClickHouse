@@ -1156,11 +1156,15 @@ namespace
         /// Set query plan fragment info
         if (call_type == CALL_EXECUTE_PLAN_FRAGMENT)
         {
-            std::vector<std::shared_ptr<String>> sources, sinks;
-            for (const auto & source : query_info.sources())
+            std::unordered_map<int, std::vector<std::shared_ptr<String>>> parent_sources;
+            for (const auto & parent : query_info.parent_sources())
             {
-                sources.emplace_back(std::make_shared<String>(source));
+                std::vector<std::shared_ptr<String>> sources;
+                for (const auto & source : parent.second.sources())
+                    sources.emplace_back(std::make_shared<String>(source));
+                parent_sources[parent.first] = std::move(sources);
             }
+            std::vector<std::shared_ptr<String>> sinks;
             for (const auto & sink : query_info.sinks())
             {
                 sinks.emplace_back(std::make_shared<String>(sink));
@@ -1168,9 +1172,8 @@ namespace
             Context::QueryPlanFragmentInfo fragmentInfo{
                 .initial_query_id = query_info.initial_query_id(),
                 .stage_id = query_info.stage_id(),
-                .parent_stage_id = query_info.parent_stage_id(),
                 .node_id = query_info.node_id(),
-                .sources = sources,
+                .parent_sources = std::move(parent_sources),
                 .sinks = sinks };
             query_context->setQueryPlanFragmentInfo(std::move(fragmentInfo));
         }
