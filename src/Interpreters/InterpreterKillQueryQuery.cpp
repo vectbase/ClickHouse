@@ -195,7 +195,13 @@ public:
 
 BlockIO InterpreterKillQueryQuery::execute()
 {
-    const auto & query = query_ptr->as<ASTKillQueryQuery &>();
+    auto & query = query_ptr->as<ASTKillQueryQuery &>();
+
+    if (query.is_initial)
+    {
+        query.cluster = CLUSTER_TYPE_ALL;
+        return executeDDLQueryOnCluster(query_ptr, getContext(), getRequiredAccessForDDLOnCluster());
+    }
 
     if (!query.cluster.empty())
         return executeDDLQueryOnCluster(query_ptr, getContext(), getRequiredAccessForDDLOnCluster());
