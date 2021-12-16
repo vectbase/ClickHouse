@@ -166,16 +166,26 @@ void QueryPlan::checkShuffle(Node * current_node, Node * child_node, CheckShuffl
 
 void QueryPlan::buildStages(ContextPtr)
 {
-    LOG_DEBUG(log, "Build stages.");
+    LOG_DEBUG(log, "===> Build stages.");
 
-    auto createStage = [this](int id, Stage * parent_stage, Node * node) {
-        stages.emplace_back(Stage{.id = id, .node = node});
+    auto createStage = [this](int id, Stage * parent_stage, Node * root_node, std::stack<Node *> & leaf_nodes) {
+        stages.emplace_back(Stage{.id = id, .root_node = root_node});
         Stage * new_stage = &stages.back();
         if (parent_stage)
         {
             new_stage->parents.push_back(parent_stage);
             parent_stage->child = new_stage;
         }
+
+        if (root_node)
+        {
+            for (int i = 0; !leaf_nodes.empty() && i < root_node->num_leaf_nodes_in_stage; ++i)
+            {
+                new_stage->leaf_nodes.emplace_back(leaf_nodes.top());
+                leaf_nodes.pop();
+            }
+        }
+        LOG_DEBUG(log, "Create stage: id: {}, {} parent stages, {} leaf nodes.", id, new_stage->parents.size(), new_stage->leaf_nodes.size());
         return new_stage;
     };
 
@@ -193,7 +203,9 @@ void QueryPlan::buildStages(ContextPtr)
     /// Used for creating stage.
     int stage_id = -1;
     Node * child_node = nullptr;
+    Node * leaf_node = nullptr;
     Stage * last_stage = nullptr;
+    std::stack<Node *> leaf_nodes;
 
     while (!stack.empty())
     {
@@ -204,14 +216,30 @@ void QueryPlan::buildStages(ContextPtr)
             ++frame.visited_children;
             one_child_is_visited = false;
 
-            /// This is shuffle, create a new stage
+            /// This is shuffle, create a new stage for child_node.
             CheckShuffleResult result;
             checkShuffle(frame.node, child_node, result);
             if (result.is_shuffle)
             {
                 ++stage_id;
-                last_stage = createStage(stage_id, last_stage, child_node);
+                last_stage = createStage(stage_id, last_stage, child_node, leaf_nodes);
+
+                /// After creating new stage, current node will be in another stage, so save current node as a candidate leaf node.
+                leaf_node = frame.node;
+                leaf_nodes.push(leaf_node);
+                frame.node->num_leaf_nodes_in_stage += 1;
             }
+            else
+            {
+                frame.node->num_leaf_nodes_in_stage += child_node->num_leaf_nodes_in_stage;
+            }
+        }
+
+        if (frame.node->children.empty())
+        {
+            leaf_node = frame.node;
+            leaf_nodes.push(leaf_node);
+            frame.node->num_leaf_nodes_in_stage = 1;
         }
 
         size_t next_child = frame.visited_children;
@@ -226,17 +254,18 @@ void QueryPlan::buildStages(ContextPtr)
             stack.push(Frame{.node = frame.node->children[next_child]});
     }
 
-    /// At last, append a shuffle for converging data.
+    /// Currently, child_node is the root node of query plan, create stage for it.
     ++stage_id;
-    last_stage = createStage(stage_id, last_stage, child_node);
+    last_stage = createStage(stage_id, last_stage, child_node, leaf_nodes);
 
-    /// Create result stage.
+    /// Append result stage for converging data.
     ++stage_id;
-    result_stage = createStage(stage_id, last_stage, nullptr);
+    result_stage = createStage(stage_id, last_stage, nullptr, leaf_nodes);
 }
 
 void QueryPlan::scheduleStages(ContextPtr context)
 {
+    LOG_DEBUG(log, "===> Schedule stages.");
     /// Use initial query id to build the plan fragment id.
     const String & initial_query_id = context->getClientInfo().current_query_id;
 
@@ -245,14 +274,14 @@ void QueryPlan::scheduleStages(ContextPtr context)
 
     /// Retrieve all replicas.
     std::unordered_map<String, ClustersWatcher::ReplicaInfoPtr> replicas = context->getClustersWatcher().getContainer();
-    LOG_DEBUG(log, "Schedule stages for query id {} across {} replicas.", initial_query_id, replicas.size());
+    LOG_DEBUG(log, "Schedule stages for query id {} across {} workers.", initial_query_id, replicas.size());
     std::vector<std::shared_ptr<String>> store_replicas, compute_replicas;
     for (const auto & replica : replicas)
     {
         const auto & replica_info = replica.second;
         LOG_DEBUG(
             log,
-            "Check replica: {} => ({}/{}/{}, {}).",
+            "Check worker: {} => ({}/{}/{}, {}).",
             replica.first,
             replica_info->type,
             replica_info->group,
@@ -268,17 +297,47 @@ void QueryPlan::scheduleStages(ContextPtr context)
             compute_replicas.emplace_back(std::make_shared<String>(replica_info->address));
         }
     }
-    LOG_DEBUG(log, "{} store, {} compute.", store_replicas.size(), compute_replicas.size());
+    LOG_DEBUG(log, "{} store workers, {} compute workers.", store_replicas.size(), compute_replicas.size());
+
+    static std::unordered_set<String> system_tables{"SystemClusters", "SystemDatabases", "SystemTables", "SystemColumns",
+                                                    "SystemDictionaries", "SystemDataSkippingIndices",
+                                                    "SystemFunctions", "SystemFormats", "SystemTableEngines",
+                                                    "SystemUsers", "SystemRoles", "SystemGrants", "SystemRoleGrants",
+                                                    "SystemCurrentRoles", "SystemEnabledRoles", "SystemRowPolicies", "SystemPrivileges",
+                                                    "SystemQuotas", "SystemQuotaLimits",
+                                                    "SystemSettings", "SystemSettingsProfiles", "SystemSettingsProfileElements",
+                                                    "SystemZooKeeper",
+                                                    "SystemNumbers", "SystemOne", "SystemZeros",
+                                                    "SystemContributors", "SystemLicenses"};
 
     auto fillStage = [&store_replicas, &compute_replicas, this, &my_replica](Stage * stage)
     {
         /// Leaf stage.
         if (stage->parents.empty())
         {
+            bool is_multi_points_data_source = false;
+            for (const auto leaf_node : stage->leaf_nodes)
+            {
+                /// It's a data source and not a system table.
+                if (leaf_node->children.empty() && !system_tables.contains(leaf_node->step->getStepDescription()))
+                {
+                    LOG_DEBUG(log, "Leaf node {}({}) is multi-points data source.", leaf_node->step->getName(), leaf_node->step->getStepDescription());
+                    is_multi_points_data_source = true;
+                    break;
+                }
+            }
             /// Fill workers.
-            stage->workers.reserve(store_replicas.size());
-            stage->workers.insert(stage->workers.end(), store_replicas.begin(), store_replicas.end());
-            /// Leaf stage's sources should be empty.
+            if (is_multi_points_data_source)
+            {
+                LOG_DEBUG(log, "Schedule to {} workers.", store_replicas.size());
+                stage->workers.reserve(store_replicas.size());
+                stage->workers.insert(stage->workers.end(), store_replicas.begin(), store_replicas.end());
+            }
+            else
+            {
+                LOG_DEBUG(log, "Schedule to 1 worker.");
+                stage->workers.emplace_back(std::make_shared<String>(my_replica));
+            }
             return;
         }
 
@@ -345,6 +404,7 @@ void QueryPlan::scheduleStages(ContextPtr context)
     }
 
     /// Send plan fragment params.
+    LOG_DEBUG(log, "===> Send stages.");
     for (auto & stage : stages)
     {
         /// Don't send result stage.
@@ -357,7 +417,7 @@ void QueryPlan::scheduleStages(ContextPtr context)
             for (const auto parent_stage : result_stage->parents)
             {
                 Block header;
-                const Node * parent_stage_node = parent_stage->node;
+                const Node * parent_stage_node = parent_stage->root_node;
                 if (!parent_stage_node->step->getOutputStream().header)
                     LOG_ERROR(log, "Step of parent stage's node has empty header.");
                 else
@@ -386,7 +446,7 @@ void QueryPlan::scheduleStages(ContextPtr context)
                 /// Only for debug.
                 LOG_DEBUG(
                     log,
-                    "Local plan fragment:\n{}",
+                    "Result plan fragment:\n{}",
                     debugLocalPlanFragment(
                         initial_query_id, result_stage->id, *result_stage->workers.front(), std::vector<Node *>{root}));
             }
@@ -442,7 +502,7 @@ void QueryPlan::buildPlanFragment(ContextPtr context)
     int my_stage_id = query_distributed_plan_info.stage_id;
     LOG_DEBUG(
         log,
-        "Build plan fragment: stage {}, has {} parent stages.",
+        "===> Build plan fragment: stage {}, has {} parent stages.",
         my_stage_id,
         query_distributed_plan_info.parent_sources.size());
 

@@ -111,6 +111,7 @@ public:
         QueryPlanStepPtr step;
         std::vector<Node *> children = {};
         Node * parent = nullptr;
+        int num_leaf_nodes_in_stage = 0; /// Number of leaf nodes(including current node and its descendant nodes) in the same stage.
     };
 
     using Nodes = std::list<Node>;
@@ -122,7 +123,8 @@ public:
         Stage * child = nullptr;
         std::vector<std::shared_ptr<String>> workers; /// Replicas that current stage should be executed on.
         std::vector<std::shared_ptr<String>> sinks; /// Child's workers.
-        Node * node; /// Current stage's root node.
+        Node * root_node; /// Current stage's root node.
+        std::vector<Node *> leaf_nodes;
     };
 
     /// Note: do not use vector, otherwise pointers to elements in it will be invalidated when vector increases.
