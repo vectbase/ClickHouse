@@ -301,7 +301,6 @@ public:
         String initial_query_id;
         int stage_id;   /// Stage that should be executed on this replica.
         String node_id; /// This is myself replica name and grpc port.
-//        int parent_stage_id;
         std::unordered_map<int, std::vector<std::shared_ptr<String>>> parent_sources; /// Mapping of parent id and its workers.
         std::vector<std::shared_ptr<String>> sinks;   /// Point to workers that receiving data.
     };

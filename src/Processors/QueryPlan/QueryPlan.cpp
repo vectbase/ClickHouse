@@ -154,6 +154,10 @@ void QueryPlan::reset()
 
 void QueryPlan::checkShuffle(Node * current_node, Node * child_node, CheckShuffleResult & result)
 {
+    /// Cases:
+    /// 1. current node is limit step, child node is sort step: no need shuffle.
+    /// 2. current node is not limit step, child node is sort step: need shuffle.
+    /// 3. child node is limit step: need shuffle.
     result.child_sorting_step = dynamic_cast<SortingStep *>(child_node->step.get());
     if (result.child_sorting_step)
         result.current_limit_step = dynamic_cast<LimitStep *>(current_node->step.get());
@@ -202,7 +206,7 @@ void QueryPlan::buildStages(ContextPtr)
 
     /// Used for creating stage.
     int stage_id = -1;
-    Node * child_node = nullptr;
+    Node * last_node = nullptr; /// Used for marking the current node's child.
     Node * leaf_node = nullptr;
     Stage * last_stage = nullptr;
     std::stack<Node *> leaf_nodes;
@@ -218,11 +222,11 @@ void QueryPlan::buildStages(ContextPtr)
 
             /// This is shuffle, create a new stage for child_node.
             CheckShuffleResult result;
-            checkShuffle(frame.node, child_node, result);
+            checkShuffle(frame.node, last_node, result);
             if (result.is_shuffle)
             {
                 ++stage_id;
-                last_stage = createStage(stage_id, last_stage, child_node, leaf_nodes);
+                last_stage = createStage(stage_id, last_stage, last_node, leaf_nodes);
 
                 /// After creating new stage, current node will be in another stage, so save current node as a candidate leaf node.
                 leaf_node = frame.node;
@@ -231,7 +235,7 @@ void QueryPlan::buildStages(ContextPtr)
             }
             else
             {
-                frame.node->num_leaf_nodes_in_stage += child_node->num_leaf_nodes_in_stage;
+                frame.node->num_leaf_nodes_in_stage += last_node->num_leaf_nodes_in_stage;
             }
         }
 
@@ -246,7 +250,7 @@ void QueryPlan::buildStages(ContextPtr)
         if (next_child == frame.node->children.size())
         {
             LOG_DEBUG(log, "Visit step: {}", frame.node->step->getName());
-            child_node = frame.node;
+            last_node = frame.node;
             one_child_is_visited = true;
             stack.pop();
         }
@@ -256,7 +260,7 @@ void QueryPlan::buildStages(ContextPtr)
 
     /// Currently, child_node is the root node of query plan, create stage for it.
     ++stage_id;
-    last_stage = createStage(stage_id, last_stage, child_node, leaf_nodes);
+    last_stage = createStage(stage_id, last_stage, last_node, leaf_nodes);
 
     /// Append result stage for converging data.
     ++stage_id;
@@ -416,20 +420,15 @@ void QueryPlan::scheduleStages(ContextPtr context)
 
             for (const auto parent_stage : result_stage->parents)
             {
-                Block header;
                 const Node * parent_stage_node = parent_stage->root_node;
-                if (!parent_stage_node->step->getOutputStream().header)
-                    LOG_ERROR(log, "Step of parent stage's node has empty header.");
-                else
-                {
-                    header = parent_stage_node->step->getOutputStream().header;
-                    LOG_DEBUG(
-                        log,
-                        "Take the output stream header of {}: {}, header columns: {}.",
-                        parent_stage_node->step->getName(),
-                        parent_stage_node->step->getStepDescription(),
-                        header.columns());
-                }
+                const auto & header = parent_stage_node->step->getOutputStream().header;
+                assert(header);
+                LOG_DEBUG(
+                    log,
+                    "Take the output stream header of {}: {}, header columns: {}.",
+                    parent_stage_node->step->getName(),
+                    parent_stage_node->step->getStepDescription(),
+                    header.columns());
 
                 auto distributed_source_step = std::make_unique<DistributedSourceStep>(
                     header,
@@ -522,7 +521,7 @@ void QueryPlan::buildPlanFragment(ContextPtr context)
 
     /// Used for locating the plan fragment.
     int stage_id = -1;
-    Node * child_node = nullptr;
+    Node * last_node = nullptr;
     std::vector<Node *> distributed_source_nodes; /// Only for debug
 
     while (!stack.empty())
@@ -532,7 +531,7 @@ void QueryPlan::buildPlanFragment(ContextPtr context)
         if (one_child_is_visited)
         {
             CheckShuffleResult result;
-            checkShuffle(frame.node, child_node, result);
+            checkShuffle(frame.node, last_node, result);
 
             /// This is a shuffle dependency between current node and the last visited child.
             if (result.is_shuffle)
@@ -542,7 +541,7 @@ void QueryPlan::buildPlanFragment(ContextPtr context)
                 const auto & it = query_distributed_plan_info.parent_sources.find(stage_id);
                 if (it != query_distributed_plan_info.parent_sources.end())
                 {
-                    assert(child_node == frame.node->children[frame.visited_children]);
+                    assert(last_node == frame.node->children[frame.visited_children]);
 
                     auto addStep = [this, &stage_id](QueryPlanStepPtr step, const String & description, Node * & node)
                     {
@@ -559,7 +558,8 @@ void QueryPlan::buildPlanFragment(ContextPtr context)
                     };
 
                     /// Create DistributedSourceStep.
-                    const auto & header = child_node->step->getOutputStream().header;
+                    const auto & header = last_node->step->getOutputStream().header;
+                    assert(header);
                     const auto & sources = it->second;
                     auto distributed_source_step = std::make_unique<DistributedSourceStep>(
                         header, sources, query_distributed_plan_info.initial_query_id, my_stage_id, stage_id, my_replica, context);
@@ -578,8 +578,8 @@ void QueryPlan::buildPlanFragment(ContextPtr context)
                     /// If parent stage has limit, add LimitStep
                     if (result.child_limit_step)
                     {
-                        assert(child_node->children.size() == 1);
-                        const SortingStep * grandchild_sorting_step = dynamic_cast<SortingStep *>(child_node->children[0]->step.get());
+                        assert(last_node->children.size() == 1);
+                        const SortingStep * grandchild_sorting_step = dynamic_cast<SortingStep *>(last_node->children[0]->step.get());
                         if  (grandchild_sorting_step)
                         {
                             auto merging_sorted
@@ -600,7 +600,7 @@ void QueryPlan::buildPlanFragment(ContextPtr context)
                     if (result.child_limit_step)
                         result.child_limit_step->resetLimitAndOffset();
 
-                    root = child_node;
+                    root = last_node;
                     {
                         /// Only for debug.
                         LOG_DEBUG(
@@ -620,7 +620,7 @@ void QueryPlan::buildPlanFragment(ContextPtr context)
         if (next_child == frame.node->children.size())
         {
             LOG_DEBUG(log, "Visit step: {}", frame.node->step->getName());
-            child_node = frame.node;
+            last_node = frame.node;
             one_child_is_visited = true;
             stack.pop();
         }
@@ -632,7 +632,7 @@ void QueryPlan::buildPlanFragment(ContextPtr context)
     ++stage_id;
     if (stage_id == my_stage_id)
     {
-        root = child_node;
+        root = last_node;
         {
             /// Only for debug.
             LOG_DEBUG(
