@@ -47,6 +47,11 @@ public:
 
     bool withTies() const { return with_ties; }
 
+    void resetLimitAndOffset() {
+        limit += offset;
+        offset = 0;
+    }
+
 private:
     size_t limit;
     size_t offset;

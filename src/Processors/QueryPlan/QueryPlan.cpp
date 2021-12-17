@@ -596,6 +596,10 @@ void QueryPlan::buildPlanFragment(ContextPtr context)
                 }
                 else if (stage_id == my_stage_id)
                 {
+                    /// If limit step is pushed down, collect (limit + offset) rows.
+                    if (result.child_limit_step)
+                        result.child_limit_step->resetLimitAndOffset();
+
                     root = child_node;
                     {
                         /// Only for debug.
