@@ -904,7 +904,7 @@ namespace
         void executeQuery();
 
         void storeQueryInfoWrapper();
-        void loadQueryInfoWrapper();
+        void loadQueryInfoWrapper(bool is_cancel = false);
 
         void processInput();
         void initializeBlockInputStream(const Block & header);
@@ -913,6 +913,7 @@ namespace
         void generateOutput();
         void produceOutput();
         void consumeOutput();
+        void cancelPlanFragment();
 
         void finishQuery();
         void finishQueryInfo();
@@ -1063,8 +1064,9 @@ namespace
             {
                 setThreadName("GRPCServerCancelPlanFragment");
                 receiveTicket();
-                loadQueryInfoWrapper();
-                executeQuery();
+                loadQueryInfoWrapper(true);
+                if (query_info_wrapper)
+                    cancelPlanFragment();
                 finishQuery();
             }
             else
@@ -1118,13 +1120,6 @@ namespace
         /// and initialize query_context, but don't build pipeline.
         if (call_type == CALL_FETCH_PLAN_FRAGMENT_RESULT)
             query_info = *query_info_wrapper->query_info;
-        else if (call_type == CALL_CANCEL_PLAN_FRAGMENT)
-        {
-            /// Find the old executor associated with the ticket, and cancel it
-            query_info_wrapper->cancel = true;
-            result.set_cancelled(true);
-            return;
-        }
 
         /// Retrieve user credentials.
         std::string user = query_info.user_name();
@@ -1300,13 +1295,20 @@ namespace
         query_info_wrapper = res.first->second;
     }
 
-    void Call::loadQueryInfoWrapper()
+    void Call::loadQueryInfoWrapper(bool is_cancel)
     {
         query_info_key = ticket.initial_query_id() + "/" + std::to_string(ticket.stage_id());
         auto res = query_info_map->get(query_info_key);
-        if (!res.second)
-            throw Exception("Query info key " + query_info_key + " not exists", ErrorCodes::LOGICAL_ERROR);
-        query_info_wrapper = res.first;
+        if (res.second)
+            query_info_wrapper = res.first;
+        else
+        {
+            if (is_cancel) /// Plan fragment maybe done.
+                LOG_INFO(log, "Query info key {} to be cancelled does not exist, so ignore it.", query_info_key);
+            else
+                throw Exception("Query info key " + query_info_key + " not exists", ErrorCodes::LOGICAL_ERROR);
+        }
+
     }
 
     void Call::processInput()
@@ -1755,6 +1757,13 @@ namespace
         /// Notify producer that current consumer is finished.
         query_info_wrapper->notifyProduce();
         LOG_DEBUG(log, "{}/{} consumer is {}.", query_info_key, ticket.node_id(), (query_info_wrapper->cancel ? "cancelled" : "done"));
+    }
+
+    void Call::cancelPlanFragment()
+    {
+        /// Cancel plan fragment, including producer and consumer.
+        query_info_wrapper->cancel = true;
+        result.set_cancelled(true);
     }
 
     void Call::finishQuery()

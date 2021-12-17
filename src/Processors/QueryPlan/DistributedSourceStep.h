@@ -15,6 +15,7 @@ public:
         int stage_id_,
         int parent_stage_id_,
         const String & node_id_,
+        bool add_aggregation_info_,
         ContextPtr context_);
 
     String getName() const override { return "DistributedSourceStep(" + toString(stage_id) + " <= " + toString(parent_stage_id) + ")"; }
@@ -31,6 +32,7 @@ private:
     int stage_id;
     int parent_stage_id;
     String node_id;
+    bool add_aggregation_info;
     ContextPtr context;
     Poco::Logger * log;
 };

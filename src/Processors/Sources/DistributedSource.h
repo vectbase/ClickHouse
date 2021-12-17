@@ -11,6 +11,7 @@ class DistributedSource : public SourceWithProgress
 {
 public:
     DistributedSource(DistributedSourceExecutorPtr executor,
+                      bool add_aggregation_info_,
                       bool async_read_);
     ~DistributedSource() override;
 
@@ -26,12 +27,13 @@ protected:
 private:
     DistributedSourceExecutorPtr query_executor;
     std::atomic<bool> was_query_canceled = false;
+    bool add_aggregation_info = false;
     const bool async_read;
     Poco::Logger * log = nullptr;
     bool is_async_state = false;
 };
 
 /// Create pipe with distributed sources.
-Pipe createDistributedSourcePipe(DistributedSourceExecutorPtr query_executor, bool async_read);
+Pipe createDistributedSourcePipe(DistributedSourceExecutorPtr query_executor, bool add_aggregation_info, bool async_read);
 
 }

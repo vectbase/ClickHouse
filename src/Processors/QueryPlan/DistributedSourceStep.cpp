@@ -12,6 +12,7 @@ DistributedSourceStep::DistributedSourceStep(
     int stage_id_,
     int parent_stage_id_,
     const String & node_id_,
+    bool add_aggregation_info_,
     ContextPtr context_)
     : ISourceStep(DataStream{.header = std::move(header_)})
     , header(output_stream->header)
@@ -20,6 +21,7 @@ DistributedSourceStep::DistributedSourceStep(
     , stage_id(stage_id_)
     , parent_stage_id(parent_stage_id_)
     , node_id(node_id_)
+    , add_aggregation_info(add_aggregation_info_)
     , context(std::move(context_))
     , log(&Poco::Logger::get("DistributedSourceStep(" + query_id + "/" + toString(stage_id) + "/" + node_id + ")"))
 {
@@ -29,7 +31,7 @@ DistributedSourceStep::DistributedSourceStep(
 void DistributedSourceStep::addPipe(Pipes & pipes, const std::shared_ptr<String> & source)
 {
     auto distributed_source_executor = std::make_shared<DistributedSourceExecutor>(header, source, query_id, node_id, parent_stage_id);
-    pipes.emplace_back(createDistributedSourcePipe(distributed_source_executor, false));
+    pipes.emplace_back(createDistributedSourcePipe(distributed_source_executor, add_aggregation_info, false));
     pipes.back().addInterpreterContext(context);
 }
 

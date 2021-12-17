@@ -11,6 +11,9 @@
 #include <Processors/QueryPlan/BuildQueryPipelineSettings.h>
 #include <Processors/QueryPlan/ReadFromMergeTree.h>
 #include <Processors/QueryPlan/DistributedSourceStep.h>
+#include <Processors/Transforms/AggregatingTransform.h>
+#include <Processors/QueryPlan/AggregatingStep.h>
+#include <Processors/QueryPlan/MergingAggregatedStep.h>
 #include <Processors/QueryPlan/SortingStep.h>
 #include <Processors/QueryPlan/LimitStep.h>
 #include <Common/JSONBuilder.h>
@@ -155,14 +158,30 @@ void QueryPlan::reset()
 void QueryPlan::checkShuffle(Node * current_node, Node * child_node, CheckShuffleResult & result)
 {
     /// Cases:
-    /// 1. current node is limit step, child node is sort step: no need shuffle.
-    /// 2. current node is not limit step, child node is sort step: need shuffle.
-    /// 3. child node is limit step: need shuffle.
+    /// 1. child node is aggregate step.
+    /// 2. current node is limit step, child node is sort step: no need shuffle.
+    /// 3. current node is not limit step, child node is sort step: need shuffle.
+    /// 4. child node is limit step: need shuffle.
+    result.child_aggregating_step = dynamic_cast<AggregatingStep *>(child_node->step.get());
+    if (result.child_aggregating_step)
+    {
+        LOG_DEBUG(log, "Check shuffle: child node is AggregatingStep");
+        result.is_shuffle = true;
+        return;
+    }
+
     result.child_sorting_step = dynamic_cast<SortingStep *>(child_node->step.get());
     if (result.child_sorting_step)
+    {
+        LOG_DEBUG(log, "Check shuffle: child node is SortingStep");
         result.current_limit_step = dynamic_cast<LimitStep *>(current_node->step.get());
+    }
     else
+    {
         result.child_limit_step = dynamic_cast<LimitStep *>(child_node->step.get());
+        if (result.child_limit_step)
+            LOG_DEBUG(log, "Check shuffle: child node is LimitStep");
+    }
 
     if ((result.child_sorting_step && !result.current_limit_step) || result.child_limit_step)
         result.is_shuffle = true;
@@ -302,6 +321,8 @@ void QueryPlan::scheduleStages(ContextPtr context)
         }
     }
     LOG_DEBUG(log, "{} store workers, {} compute workers.", store_replicas.size(), compute_replicas.size());
+    if (store_replicas.empty() || compute_replicas.empty())
+        throw Exception("No enough store workers({}) or compute workers({}).", store_replicas.size(), compute_replicas.size());
 
     static std::unordered_set<String> system_tables{"SystemClusters", "SystemDatabases", "SystemTables", "SystemColumns",
                                                     "SystemDictionaries", "SystemDataSkippingIndices",
@@ -437,6 +458,7 @@ void QueryPlan::scheduleStages(ContextPtr context)
                     result_stage->id,
                     parent_stage->id,
                     *result_stage->workers.front(),
+                    false,
                     context);
                 /// TODO: improve to support adding multiple distributed_source_step.
                 addStep(std::move(distributed_source_step));
@@ -537,12 +559,14 @@ void QueryPlan::buildPlanFragment(ContextPtr context)
             if (result.is_shuffle)
             {
                 ++stage_id;
-                /// Add a DistributedSourceStep between current node and child node.
+
+                /// This is one of my parent stages.
                 const auto & it = query_distributed_plan_info.parent_sources.find(stage_id);
                 if (it != query_distributed_plan_info.parent_sources.end())
                 {
                     assert(last_node == frame.node->children[frame.visited_children]);
 
+                    /// Add steps between current node and child node.
                     auto addStep = [this, &stage_id](QueryPlanStepPtr step, const String & description, Node * & node)
                     {
                         LOG_DEBUG(log, "Add step: {}, parent stage: {}", step->getName(), stage_id);
@@ -557,15 +581,43 @@ void QueryPlan::buildPlanFragment(ContextPtr context)
                         node = &nodes.back();
                     };
 
+                    bool add_agg_info = false;
+                    std::unique_ptr<AggregatingStep> aggregating_step;
+                    if (result.child_aggregating_step)
+                    {
+                        add_agg_info = true;
+                        /// Create AggregatingStep, and it should be non-final.
+                        aggregating_step = std::make_unique<AggregatingStep>(*result.child_aggregating_step);
+                    }
+                    /// The aggregating_step header will include aggregate function.
+                    const auto & header = result.child_aggregating_step == nullptr ? last_node->step->getOutputStream().header
+                                                                                   : aggregating_step->getOutputStream().header;
+
                     /// Create DistributedSourceStep.
-                    const auto & header = last_node->step->getOutputStream().header;
                     assert(header);
                     const auto & sources = it->second;
                     auto distributed_source_step = std::make_unique<DistributedSourceStep>(
-                        header, sources, query_distributed_plan_info.initial_query_id, my_stage_id, stage_id, my_replica, context);
+                        header, sources, query_distributed_plan_info.initial_query_id, my_stage_id, stage_id, my_replica, add_agg_info, context);
                     Node * new_node = nullptr;
                     addStep(std::move(distributed_source_step), "", new_node);
                     distributed_source_nodes.emplace_back(new_node); /// For debug
+
+                    /// If parent stage has aggregate, add MergingAggregatedStep.
+                    if (result.child_aggregating_step)
+                    {
+                        const auto & settings = context->getSettingsRef();
+                        auto transform_params = std::make_shared<AggregatingTransformParams>(aggregating_step->getParams(), true);
+                        transform_params->params.intermediate_header = new_node->step->getOutputStream().header;
+
+                        auto merging_aggregated = std::make_unique<MergingAggregatedStep>(
+                            new_node->step->getOutputStream(),
+                            std::move(transform_params),
+                            settings.distributed_aggregation_memory_efficient,
+                            settings.max_threads,
+                            settings.aggregation_memory_efficient_merge_threads);
+
+                        addStep(std::move(merging_aggregated), "Merge aggregated streams for distributed AGGREGATE", new_node);
+                    }
 
                     /// If parent stage has order by, add SortingStep
                     if (result.child_sorting_step)
@@ -596,6 +648,20 @@ void QueryPlan::buildPlanFragment(ContextPtr context)
                 }
                 else if (stage_id == my_stage_id)
                 {
+                    auto replaceStep = [this, &stage_id](QueryPlanStepPtr step, Node * & node)
+                    {
+                        LOG_DEBUG(log, "Replace step: {}, stage: {}", step->getName(), stage_id);
+                        node->step = std::move(step);
+                    };
+
+                    if (result.child_aggregating_step)
+                    {
+                        auto aggregating_step = std::make_unique<AggregatingStep>(*result.child_aggregating_step);
+                        {
+                            replaceStep(std::move(aggregating_step), last_node);
+                        }
+                    }
+
                     /// If limit step is pushed down, collect (limit + offset) rows.
                     if (result.child_limit_step)
                         result.child_limit_step->resetLimitAndOffset();
@@ -661,6 +727,15 @@ void QueryPlan::buildDistributedPlan(ContextPtr context)
 
     LOG_DEBUG(log, "Initial query id: {}, to be built to distributed plan.", context->getInitialQueryId());
 
+    {
+        /// Print the original query plan.
+        WriteBufferFromOwnString buf;
+        buf << "------ Query Plan ------\n";
+        QueryPlan::ExplainPlanOptions options{.header = true, .actions = true};
+        explainPlan(buf, options);
+        LOG_DEBUG(log, "After buildQueryPlan:\n{}", buf.str());
+    }
+
     checkInitialized();
     if (context->isInitialNode())
     {
@@ -677,7 +752,6 @@ void QueryPlan::buildDistributedPlan(ContextPtr context)
 String QueryPlan::debugLocalPlanFragment(const String & query_id, int stage_id, const String & node_id, const std::vector<Node *> distributed_source_nodes)
 {
     WriteBufferFromOwnString buf;
-    ExplainPlanOptions options;
     buf << "------ Local Plan Fragment ------\n";
     buf << "Fragment ID: " << query_id << "/" << stage_id << "/" << node_id;
     buf.write('\n');
@@ -692,7 +766,8 @@ String QueryPlan::debugLocalPlanFragment(const String & query_id, int stage_id, 
             buf << *source << " ";
         buf.write('\n');
     }
-    buf << "Plan Fragment:\n";
+    buf << "\nPlan Fragment:\n";
+    ExplainPlanOptions options{.header = true, .actions = true};
     explainPlan(buf, options);
     return buf.str();
 }
