@@ -25,6 +25,7 @@ namespace ErrorCodes
 {
     extern const int INVALID_GRPC_QUERY_INFO;
     extern const int GRPC_READ_ERROR;
+    extern const int GRPC_CANCEL_ERROR;
 }
 
 GRPCClient::GRPCClient(const String & addr_)
@@ -53,8 +54,9 @@ GRPCResult GRPCClient::executePlanFragment(GRPCQueryInfo & query_info)
     }
 }
 
-void GRPCClient::prepareRead(const GRPCTicket & ticket)
+void GRPCClient::prepareRead(const GRPCTicket & ticket_)
 {
+    ticket = ticket_;
     auto ch = grpc::CreateChannel(addr, grpc::InsecureChannelCredentials());
     std::shared_ptr<grpc::ClientContext> ctx = std::make_shared<grpc::ClientContext>();
     auto stub = clickhouse::grpc::ClickHouse::NewStub(ch);
@@ -87,5 +89,30 @@ Block GRPCClient::read()
     }
 
     throw Exception("Read from grpc server " + addr + "failed, " + toString(result.exception().code()) + ", " + result.exception().display_text(), ErrorCodes::GRPC_READ_ERROR, true);
+}
+
+void GRPCClient::cancel()
+{
+    grpc::ClientContext ctx;
+    GRPCResult result;
+
+    auto status = inner_context->stub->CancelPlanFragment(&ctx, ticket, &result);
+
+    auto plan_fragment_id = ticket.query_id() + toString(ticket.stage_id()) + ticket.node_id();
+    if (status.ok())
+    {
+        if (result.cancelled())
+            LOG_INFO(log, "Cancel success from node: {}, plan fragment id: {}", addr, plan_fragment_id);
+        else
+        {
+            throw Exception("Cancel failed from node: " + addr + ", plan fragment id: " + plan_fragment_id + ", code: " + toString(result.exception().code()) + ", " + result.exception().display_text(), ErrorCodes::GRPC_CANCEL_ERROR, true);
+        }
+    }
+    else
+    {
+        LOG_ERROR(
+            log, "Cancel failed from node {}, code: {}, plan fragment id: {}.", addr, status.error_code(), plan_fragment_id);
+        throw Exception(status.error_message() + ", " + result.exception().display_text(), ErrorCodes::GRPC_CANCEL_ERROR, true);
+    }
 }
 }

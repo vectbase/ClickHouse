@@ -192,4 +192,5 @@ service ClickHouse {
 
    rpc ExecutePlanFragment(QueryInfo) returns (Result) {}
    rpc FetchPlanFragmentResult(Ticket) returns (stream Result) {}
+   rpc CancelPlanFragment(Ticket) returns (Result) {}
 }

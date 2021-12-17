@@ -37,6 +37,9 @@ Block DistributedSourceExecutor::read()
     {
         auto block = client.read();
         LOG_DEBUG(log, "Read block, rows: {}, columns: {}.", block.rows(), block.columns());
+        if (!block)
+            finished = true;
+
         return block;
     }
     catch (...)
@@ -63,6 +66,7 @@ void DistributedSourceExecutor::cancel()
         return;
 
     LOG_DEBUG(log, "Cancel reading from {}.", *source);
+    client.cancel();
     tryCancel("Cancelling query");
 }
 

@@ -33,11 +33,14 @@ public:
     GRPCResult executePlanFragment(GRPCQueryInfo & g_query_info);
 
     /// Initialize reader and inner context.
-    void prepareRead(const GRPCTicket & ticket);
+    void prepareRead(const GRPCTicket & ticket_);
 
     /// Try to read a block from remote.
     /// If got EOF, an empty block will be returned, you can use if (!block) to check it.
     Block read();
+
+    /// Cancel plan fragment (ticket associated with the prepareRead)
+    void cancel();
 
 private:
     struct InnerContext
@@ -61,6 +64,7 @@ private:
     Poco::Logger * log;
     String addr;
     std::unique_ptr<InnerContext> inner_context;
+    GRPCTicket ticket;
 };
 }
 //#endif

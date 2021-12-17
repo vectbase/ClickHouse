@@ -44,6 +44,7 @@
 #include <grpc++/server.h>
 #include <grpc++/server_builder.h>
 
+#include <base/logger_useful.h>
 
 using GRPCService = clickhouse::grpc::ClickHouse::AsyncService;
 using GRPCQueryInfo = clickhouse::grpc::QueryInfo;
@@ -333,7 +334,8 @@ namespace
         CALL_WITH_STREAM_OUTPUT, /// ExecuteQueryWithStreamOutput() call
         CALL_WITH_STREAM_IO,     /// ExecuteQueryWithStreamIO() call
         CALL_EXECUTE_PLAN_FRAGMENT,        /// ExecutePlanFragment() call
-        CALL_FETCH_PLAN_FRAGMENT_RESULT,  /// FetchPlanFragmentResult() call
+        CALL_FETCH_PLAN_FRAGMENT_RESULT,   /// FetchPlanFragmentResult() call
+        CALL_CANCEL_PLAN_FRAGMENT,         /// CancelPlanFragment() call
         CALL_MAX,
     };
 
@@ -347,6 +349,7 @@ namespace
             case CALL_WITH_STREAM_IO: return "ExecuteQueryWithStreamIO()";
             case CALL_EXECUTE_PLAN_FRAGMENT: return "ExecutePlanFragment()";
             case CALL_FETCH_PLAN_FRAGMENT_RESULT: return "FetchPlanFragmentResult()";
+            case CALL_CANCEL_PLAN_FRAGMENT: return "CancelPlanFragment";
             case CALL_MAX: break;
         }
         __builtin_unreachable();
@@ -601,6 +604,47 @@ namespace
         std::optional<GRPCTicket> ticket;
     };
 
+    template<>
+    class Responder<CALL_CANCEL_PLAN_FRAGMENT> : public BaseResponder
+    {
+    public:
+        void start(GRPCService & grpc_service,
+                   grpc::ServerCompletionQueue & new_call_queue,
+                   grpc::ServerCompletionQueue & notification_queue,
+                   const CompletionCallback & callback) override
+        {
+            grpc_service.RequestCancelPlanFragment(&grpc_context, &ticket.emplace(), &writer, &new_call_queue, &notification_queue, getCallbackPtr(callback));
+        }
+
+        void read(GRPCQueryInfo &, const CompletionCallback &) override
+        {
+            throw Exception("Responder<CALL_CANCEL_PLAN_FRAGMENT>::read() should not be called", ErrorCodes::LOGICAL_ERROR);
+        }
+
+        void read(GRPCTicket & ticket_, const CompletionCallback & callback) override
+        {
+            if (!ticket.has_value())
+                callback(false);
+            ticket_ = std::move(ticket).value();
+            ticket.reset();
+            callback(true);
+        }
+
+        void write(const GRPCResult &, const CompletionCallback &) override
+        {
+            throw Exception("Responder<CALL_CANCEL_PLAN_FRAGMENT>::write() should not be called", ErrorCodes::LOGICAL_ERROR);
+        }
+
+        void writeAndFinish(const GRPCResult & result, const grpc::Status & status, const CompletionCallback & callback) override
+        {
+            writer.Finish(result, status, getCallbackPtr(callback));
+        }
+
+    private:
+        grpc::ServerAsyncResponseWriter<GRPCResult> writer{&grpc_context};
+        std::optional<GRPCTicket> ticket;
+    };
+
     std::unique_ptr<BaseResponder> makeResponder(CallType call_type)
     {
         switch (call_type)
@@ -611,6 +655,7 @@ namespace
             case CALL_WITH_STREAM_IO: return std::make_unique<Responder<CALL_WITH_STREAM_IO>>();
             case CALL_EXECUTE_PLAN_FRAGMENT: return std::make_unique<Responder<CALL_EXECUTE_PLAN_FRAGMENT>>();
             case CALL_FETCH_PLAN_FRAGMENT_RESULT: return std::make_unique<Responder<CALL_FETCH_PLAN_FRAGMENT_RESULT>>();
+            case CALL_CANCEL_PLAN_FRAGMENT: return std::make_unique<Responder<CALL_CANCEL_PLAN_FRAGMENT>>();
             case CALL_MAX: break;
         }
         __builtin_unreachable();
@@ -1014,6 +1059,14 @@ namespace
                 consumeOutput();
                 finishQuery();
             }
+            else if (call_type == CALL_CANCEL_PLAN_FRAGMENT)
+            {
+                setThreadName("GRPCServerCancelPlanFragment");
+                receiveTicket();
+                loadQueryInfoWrapper();
+                executeQuery();
+                finishQuery();
+            }
             else
             {
                 setThreadName("GRPCServerCall");
@@ -1065,6 +1118,13 @@ namespace
         /// and initialize query_context, but don't build pipeline.
         if (call_type == CALL_FETCH_PLAN_FRAGMENT_RESULT)
             query_info = *query_info_wrapper->query_info;
+        else if (call_type == CALL_CANCEL_PLAN_FRAGMENT)
+        {
+            /// Find the old executor associated with the ticket, and cancel it
+            query_info_wrapper->cancel = true;
+            result.set_cancelled(true);
+            return;
+        }
 
         /// Retrieve user credentials.
         std::string user = query_info.user_name();
