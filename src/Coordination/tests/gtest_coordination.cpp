@@ -923,7 +923,7 @@ TEST_P(CoordinationTest, SnapshotableHashMapTrySnapshot)
 
 void addNode(DB::KeeperStorage & storage, const std::string & path, const std::string & data, int64_t ephemeral_owner=0)
 {
-    using Node = DB::KeeperStorage::Node;
+    using Node = DB::KeeperStorageNode;
     Node node{};
     node.data = data;
     node.stat.ephemeralOwner = ephemeral_owner;

@@ -55,7 +55,7 @@ namespace
         return "/";
     }
 
-    void writeNode(const KeeperStorage::Node & node, WriteBuffer & out)
+    void writeNode(const KeeperStorageNode & node, WriteBuffer & out)
     {
         writeBinary(node.data, out);
 
@@ -78,7 +78,7 @@ namespace
         writeBinary(node.seq_num, out);
     }
 
-    void readNode(KeeperStorage::Node & node, ReadBuffer & in, SnapshotVersion version, ACLMap & acl_map)
+    void readNode(KeeperStorageNode & node, ReadBuffer & in, SnapshotVersion version, ACLMap & acl_map)
     {
         readBinary(node.data, in);
 
@@ -268,7 +268,7 @@ void KeeperStorageSnapshot::deserialize(SnapshotDeserializationResult & deserial
     {
         std::string path;
         readBinary(path, in);
-        KeeperStorage::Node node{};
+        KeeperStorageNode node{};
         readNode(node, in, current_version, storage.acl_map);
         storage.container.insertOrReplace(path, node);
         if (node.stat.ephemeralOwner != 0)
@@ -276,15 +276,26 @@ void KeeperStorageSnapshot::deserialize(SnapshotDeserializationResult & deserial
 
         current_size++;
     }
-
-    for (const auto & itr : storage.container)
+    
+    std::vector<std::string> vecKey;
+    storage.container.rocksdbIter(vecKey);
+    for (const auto & itr : vecKey)
     {
-        if (itr.key != "/")
+        if (itr != "/")
         {
-            auto parent_path = parentPath(itr.key);
-            storage.container.updateValue(parent_path, [&path = itr.key] (KeeperStorage::Node & value) { value.children.insert(getBaseName(path)); });
+            auto parent_path = parentPath(itr);
+            storage.container.updateValue(parent_path, [&path = itr] (KeeperStorageNode & value) { value.children.insert(getBaseName(path)); });
         }
     }
+    
+    // for (const auto & itr : storage.container)
+    // {
+    //     if (itr.key != "/")
+    //     {
+    //         auto parent_path = parentPath(itr.key);
+    //         storage.container.updateValue(parent_path, [&path = itr.key] (KeeperStorageNode & value) { value.children.insert(getBaseName(path)); });
+    //     }
+    // }
 
     size_t active_sessions_size;
     readBinary(active_sessions_size, in);
@@ -368,12 +379,15 @@ KeeperStorageSnapshot::~KeeperStorageSnapshot()
 KeeperSnapshotManager::KeeperSnapshotManager(
     const std::string & snapshots_path_, size_t snapshots_to_keep_,
     bool compress_snapshots_zstd_,
-    const std::string & superdigest_, size_t storage_tick_time_)
+    const std::string & superdigest_, size_t storage_tick_time_, 
+    const std::string & rocksdbpath_, int isuse_rocksdb_)
     : snapshots_path(snapshots_path_)
     , snapshots_to_keep(snapshots_to_keep_)
     , compress_snapshots_zstd(compress_snapshots_zstd_)
     , superdigest(superdigest_)
     , storage_tick_time(storage_tick_time_)
+    , rocksdbpath(rocksdbpath_)
+    , isuse_rocksdb(isuse_rocksdb_)
 {
     namespace fs = std::filesystem;
 
@@ -496,7 +510,7 @@ SnapshotDeserializationResult KeeperSnapshotManager::deserializeSnapshotFromBuff
         compressed_reader = std::make_unique<CompressedReadBuffer>(*reader);
 
     SnapshotDeserializationResult result;
-    result.storage = std::make_unique<KeeperStorage>(storage_tick_time, superdigest);
+    result.storage = std::make_unique<KeeperStorage>(storage_tick_time, superdigest, rocksdbpath, isuse_rocksdb);
     KeeperStorageSnapshot::deserialize(result, *compressed_reader);
     return result;
 }
