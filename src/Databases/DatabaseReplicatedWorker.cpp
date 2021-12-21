@@ -71,7 +71,7 @@ void DatabaseReplicatedDDLWorker::initializeReplication()
         last_skipped_entry_name.emplace(DDLTaskBase::getLogEntryName(our_log_ptr));
 }
 
-String DatabaseReplicatedDDLWorker::enqueueQuery(DDLLogEntry & entry, const String & , const String & )
+String DatabaseReplicatedDDLWorker::enqueueQuery(DDLLogEntry & entry)
 {
     auto zookeeper = getAndSetZooKeeper();
     return enqueueQueryImpl(zookeeper, entry, database);

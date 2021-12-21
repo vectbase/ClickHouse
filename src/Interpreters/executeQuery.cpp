@@ -376,8 +376,7 @@ static std::tuple<ASTPtr, BlockIO> executeQueryImpl(
     ContextMutablePtr context,
     bool internal,
     QueryProcessingStage::Enum stage,
-    ReadBuffer * istr,
-    bool is_initial = true)
+    ReadBuffer * istr)
 {
     const auto current_time = std::chrono::system_clock::now();
 
@@ -598,8 +597,6 @@ static std::tuple<ASTPtr, BlockIO> executeQueryImpl(
 
             return std::make_tuple(ast, std::move(io));
         }
-        // is_initial flag
-        ast->is_initial = is_initial;
 
         auto interpreter = InterpreterFactory::get(ast, context, SelectQueryOptions(stage).setInternal(internal));
 
@@ -981,8 +978,7 @@ void executeQuery(
     bool allow_into_outfile,
     ContextMutablePtr context,
     SetResultDetailsFunc set_result_details,
-    const std::optional<FormatSettings> & output_format_settings,
-    bool is_initial)
+    const std::optional<FormatSettings> & output_format_settings)
 {
     PODArray<char> parse_buf;
     const char * begin;
@@ -1016,7 +1012,7 @@ void executeQuery(
     ASTPtr ast;
     BlockIO streams;
 
-    std::tie(ast, streams) = executeQueryImpl(begin, end, context, false, QueryProcessingStage::Complete, &istr, is_initial);
+    std::tie(ast, streams) = executeQueryImpl(begin, end, context, false, QueryProcessingStage::Complete, &istr);
     auto & pipeline = streams.pipeline;
 
     std::unique_ptr<WriteBuffer> compressed_buffer;

@@ -19,7 +19,4 @@ void loadMetadata(ContextMutablePtr context, const String & default_database_nam
 /// so we startup system tables after all databases are loaded.
 void startupSystemTables();
 
-/// Synchronize databases and tables from meta service
-void downloadMetaData(ContextMutablePtr context);
-
 }

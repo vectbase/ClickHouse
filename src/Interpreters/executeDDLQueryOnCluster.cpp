@@ -59,8 +59,7 @@ BlockIO executeDDLQueryOnCluster(const ASTPtr & query_ptr, ContextPtr context, c
     return executeDDLQueryOnCluster(query_ptr, context, AccessRightsElements{query_requires_access});
 }
 
-BlockIO executeDDLQueryOnCluster(const ASTPtr & query_ptr_, ContextPtr context, AccessRightsElements && query_requires_access,
-                                 const String& meta_path, const String& meta_info)
+BlockIO executeDDLQueryOnCluster(const ASTPtr & query_ptr_, ContextPtr context, AccessRightsElements && query_requires_access)
 {
     /// Remove FORMAT <fmt> and INTO OUTFILE <file> if exists
     ASTPtr query_ptr = query_ptr_->clone();
@@ -85,35 +84,17 @@ BlockIO executeDDLQueryOnCluster(const ASTPtr & query_ptr_, ContextPtr context, 
         }
     }
 
-    bool is_reserved_cluster = query->cluster == CLUSTER_TYPE_ALL || query->cluster == CLUSTER_TYPE_STORE || query->cluster == CLUSTER_TYPE_COMPUTE;
+    query->cluster = context->getMacros()->expand(query->cluster);
+    ClusterPtr cluster = context->getCluster(query->cluster);
     DDLWorker & ddl_worker = context->getDDLWorker();
+
+    /// Enumerate hosts which will be used to send query.
+    Cluster::AddressesWithFailover shards = cluster->getShardsAddresses();
     std::vector<HostID> hosts;
-    Cluster::AddressesWithFailover shards;
-    if (!is_reserved_cluster)
+    for (const auto & shard : shards)
     {
-        query->cluster = context->getMacros()->expand(query->cluster);
-        ClusterPtr cluster = context->getCluster(query->cluster);
-        /// Enumerate hosts which will be used to send query.
-        shards = cluster->getShardsAddresses();
-        for (const auto & shard : shards)
-        {
-            for (const auto & addr : shard)
-                hosts.emplace_back(addr);
-        }
-    }
-    else
-    {
-        /// Get Hosts from meta service
-        auto getHostsFromMetaService = [&context, &query](std::vector<HostID>& hosts){
-            std::unordered_map<String, ClustersWatcher::ReplicaInfoPtr> replicas = context->getClustersWatcher().getContainer();
-            for (const auto & replica : replicas)
-            {
-                const auto & replica_info = replica.second;
-                if (query->cluster == CLUSTER_TYPE_ALL || (query->cluster == replica_info->type))
-                    hosts.emplace_back(HostID(replica_info->name, context->getTCPPort()));
-            }
-        };
-        getHostsFromMetaService(hosts);
+        for (const auto & addr : shard)
+            hosts.emplace_back(addr);
     }
 
     if (hosts.empty())
@@ -129,7 +110,7 @@ BlockIO executeDDLQueryOnCluster(const ASTPtr & query_ptr_, ContextPtr context, 
     bool use_local_default_database = false;
     const String & current_database = context->getCurrentDatabase();
 
-    if (!is_reserved_cluster && need_replace_current_database)
+    if (need_replace_current_database)
     {
         Strings shard_default_databases;
         for (const auto & shard : shards)
@@ -182,7 +163,7 @@ BlockIO executeDDLQueryOnCluster(const ASTPtr & query_ptr_, ContextPtr context, 
     entry.query = queryToString(query_ptr);
     entry.initiator = ddl_worker.getCommonHostID();
     entry.setSettingsIfRequired(context);
-    String node_path = ddl_worker.enqueueQuery(entry, meta_path, meta_info);
+    String node_path = ddl_worker.enqueueQuery(entry);
 
     return getDistributedDDLStatus(node_path, entry, context);
 }

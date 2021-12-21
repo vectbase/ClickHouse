@@ -1154,8 +1154,6 @@ if (ThreadFuzzer::instance().isEffective())
 
     try
     {
-        /// New server download metadata from keeper, and add to server.
-        downloadMetaData(global_context);
         auto & database_catalog = DatabaseCatalog::instance();
         /// We load temporary database first, because projections need it.
         database_catalog.initializeAndLoadTemporaryDatabase();
