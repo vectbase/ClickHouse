@@ -10,7 +10,9 @@
 #include <Processors/QueryPlan/Optimizations/QueryPlanOptimizationSettings.h>
 #include <Processors/QueryPlan/BuildQueryPipelineSettings.h>
 #include <Processors/QueryPlan/ReadFromMergeTree.h>
+#include <Processors/QueryPlan/ReadFromRemote.h>
 #include <Processors/QueryPlan/DistributedSourceStep.h>
+#include <Processors/QueryPlan/JoinStep.h>
 #include <Processors/Transforms/AggregatingTransform.h>
 #include <Processors/QueryPlan/AggregatingStep.h>
 #include <Processors/QueryPlan/MergingAggregatedStep.h>
@@ -162,6 +164,17 @@ void QueryPlan::checkShuffle(Node * current_node, Node * child_node, CheckShuffl
     /// 2. current node is limit step, child node is sort step: no need shuffle.
     /// 3. current node is not limit step, child node is sort step: need shuffle.
     /// 4. child node is limit step: need shuffle.
+    result.current_join_step = dynamic_cast<JoinStep *>(current_node->step.get());
+    if (result.current_join_step)
+    {
+        LOG_DEBUG(log, "Check shuffle: current node is JoinStep(0x{})", static_cast<void*>(result.current_join_step));
+        assert(current_node->children.size() == 2);
+        /// Only broadcast right side.
+        if (child_node == current_node->children[1])
+            result.is_shuffle = true;
+        return;
+    }
+
     result.child_aggregating_step = dynamic_cast<AggregatingStep *>(child_node->step.get());
     if (result.child_aggregating_step)
     {
@@ -187,28 +200,32 @@ void QueryPlan::checkShuffle(Node * current_node, Node * child_node, CheckShuffl
         result.is_shuffle = true;
 }
 
-void QueryPlan::buildStages(ContextPtr)
+void QueryPlan::buildStages(ContextPtr context)
 {
     LOG_DEBUG(log, "===> Build stages.");
 
-    auto createStage = [this](int id, Stage * parent_stage, Node * root_node, std::stack<Node *> & leaf_nodes) {
+    auto createStage = [this](int id, std::stack<Stage *> & parent_stages, Node * root_node, std::stack<Node *> & leaf_nodes) {
         stages.emplace_back(Stage{.id = id, .root_node = root_node});
         Stage * new_stage = &stages.back();
-        if (parent_stage)
-        {
-            new_stage->parents.push_back(parent_stage);
-            parent_stage->child = new_stage;
-        }
 
         if (root_node)
         {
+            for (int i = 0; !parent_stages.empty() && i < root_node->num_parent_stages; ++i)
+            {
+                new_stage->parents.emplace_back(parent_stages.top());
+                parent_stages.top()->child = new_stage;
+                parent_stages.pop();
+            }
             for (int i = 0; !leaf_nodes.empty() && i < root_node->num_leaf_nodes_in_stage; ++i)
             {
                 new_stage->leaf_nodes.emplace_back(leaf_nodes.top());
+                /// This leaf node is a data source node reading data from storage.
+                if (leaf_nodes.top()->children.empty())
+                    new_stage->is_leaf_stage = true;
                 leaf_nodes.pop();
             }
         }
-        LOG_DEBUG(log, "Create stage: id: {}, {} parent stages, {} leaf nodes.", id, new_stage->parents.size(), new_stage->leaf_nodes.size());
+        LOG_DEBUG(log, "Create stage: id: {}, has {} parent stages and {} leaf nodes.", id, new_stage->parents.size(), new_stage->leaf_nodes.size());
         return new_stage;
     };
 
@@ -228,6 +245,7 @@ void QueryPlan::buildStages(ContextPtr)
     Node * last_node = nullptr; /// Used for marking the current node's child.
     Node * leaf_node = nullptr;
     Stage * last_stage = nullptr;
+    std::stack<Stage *> parent_stages;
     std::stack<Node *> leaf_nodes;
 
     while (!stack.empty())
@@ -236,16 +254,18 @@ void QueryPlan::buildStages(ContextPtr)
 
         if (one_child_is_visited)
         {
-            ++frame.visited_children;
-            one_child_is_visited = false;
-
             /// This is shuffle, create a new stage for child_node.
             CheckShuffleResult result;
             checkShuffle(frame.node, last_node, result);
             if (result.is_shuffle)
             {
+
                 ++stage_id;
-                last_stage = createStage(stage_id, last_stage, last_node, leaf_nodes);
+                last_stage = createStage(stage_id, parent_stages, last_node, leaf_nodes);
+
+                /// The new stage is parent of current node's stage.
+                parent_stages.push(last_stage);
+                frame.node->num_parent_stages += 1;
 
                 /// After creating new stage, current node will be in another stage, so save current node as a candidate leaf node.
                 leaf_node = frame.node;
@@ -254,12 +274,22 @@ void QueryPlan::buildStages(ContextPtr)
             }
             else
             {
+                frame.node->num_parent_stages += last_node->num_parent_stages;
                 frame.node->num_leaf_nodes_in_stage += last_node->num_leaf_nodes_in_stage;
             }
+
+            ++frame.visited_children;
+            one_child_is_visited = false;
         }
 
         if (frame.node->children.empty())
         {
+            if (dynamic_cast<ReadFromRemote *>(frame.node->step.get()))
+                throw Exception(
+                    "Not support building distributed plan on Distributed table engine, maybe you want to set "
+                    "enable_distributed_plan=false",
+                    ErrorCodes::LOGICAL_ERROR);
+            last_stage = nullptr;
             leaf_node = frame.node;
             leaf_nodes.push(leaf_node);
             frame.node->num_leaf_nodes_in_stage = 1;
@@ -279,11 +309,75 @@ void QueryPlan::buildStages(ContextPtr)
 
     /// Currently, child_node is the root node of query plan, create stage for it.
     ++stage_id;
-    last_stage = createStage(stage_id, last_stage, last_node, leaf_nodes);
+    last_stage = createStage(stage_id, parent_stages, last_node, leaf_nodes);
 
     /// Append result stage for converging data.
     ++stage_id;
-    result_stage = createStage(stage_id, last_stage, nullptr, leaf_nodes);
+    /// Create a virtual node, used in iterating stages.
+    parent_stages.push(last_stage);
+    auto step = std::make_unique<DistributedSourceStep>(stage_id, last_stage->id, context);
+    nodes.emplace_back(Node{.step = std::move(step), .children = {last_node}, .num_parent_stages = 1});
+    root = &nodes.back();
+    leaf_nodes.push(root);
+    root->num_leaf_nodes_in_stage = 1;
+    result_stage = createStage(stage_id, parent_stages, root, leaf_nodes);
+
+    debugStages();
+}
+
+void QueryPlan::debugStages()
+{
+    WriteBufferFromOwnString buf;
+    for (const auto & stage : stages)
+    {
+        if (stage.is_leaf_stage)
+        {
+            buf << "stage id (leaf)     : ";
+        }
+        else
+        {
+            buf << "stage id (non-leaf) : ";
+        }
+        buf << stage.id;
+        if (stage.child)
+        {
+            buf << " => " << stage.child->id;
+        }
+        buf.write('\n');
+
+        buf << "parent stages id    : ";
+        for (const auto parent_stage : stage.parents)
+        {
+            buf << parent_stage->id << " ";
+        }
+        buf.write('\n');
+
+        if (stage.root_node)
+        {
+            buf << "root node           : " << stage.root_node->step->getName();
+            buf.write('\n');
+        }
+
+        buf << "leaf nodes          :\n";
+        /// Iterate reversely, because leaf node are stored right to left.
+        for (auto it = stage.leaf_nodes.rbegin(); it != stage.leaf_nodes.rend(); ++it)
+        {
+            buf << "  " << (*it)->step->getName();
+            if ((*it)->children.empty())
+            {
+                buf << " [S]";
+                if (const auto * step = dynamic_cast<ReadFromMergeTree *>((*it)->step.get()))
+                {
+                    const auto & storage_id = step->getStorageID();
+                    buf << " (" << storage_id.database_name << "." << storage_id.table_name << ")";
+                }
+            }
+            buf.write('\n');
+        }
+
+        buf << "------------------------------\n";
+    }
+    LOG_DEBUG(log, "===> Print Stages:\n{}", buf.str());
 }
 
 void QueryPlan::scheduleStages(ContextPtr context)
@@ -338,7 +432,7 @@ void QueryPlan::scheduleStages(ContextPtr context)
     auto fillStage = [&store_replicas, &compute_replicas, this, &my_replica](Stage * stage)
     {
         /// Leaf stage.
-        if (stage->parents.empty())
+        if (stage->is_leaf_stage)
         {
             bool is_multi_points_data_source = false;
             for (const auto leaf_node : stage->leaf_nodes)
@@ -460,7 +554,7 @@ void QueryPlan::scheduleStages(ContextPtr context)
                     *result_stage->workers.front(),
                     false,
                     context);
-                /// TODO: improve to support adding multiple distributed_source_step.
+                /// TODO: Improve to support adding multiple distributed_source_step, such as Union operator.
                 addStep(std::move(distributed_source_step));
             }
             {
@@ -482,6 +576,7 @@ void QueryPlan::scheduleStages(ContextPtr context)
         }
 
         LOG_DEBUG(log, "Stage {} has {} workers.", stage.id, stage.workers.size());
+        assert(!stage.workers.empty());
 
         /// Create query info.
         GRPCQueryInfo query_info;
@@ -622,7 +717,6 @@ void QueryPlan::buildPlanFragment(ContextPtr context)
                     /// If parent stage has order by, add SortingStep
                     if (result.child_sorting_step)
                     {
-
                         auto merging_sorted = std::make_unique<SortingStep>(new_node->step->getOutputStream(), *result.child_sorting_step);
                         addStep(std::move(merging_sorted), "Merge sorted streams for distributed ORDER BY", new_node);
                     }
@@ -712,29 +806,34 @@ void QueryPlan::buildPlanFragment(ContextPtr context)
 
 void QueryPlan::buildDistributedPlan(ContextPtr context)
 {
-    /// Query directly hit on the store node.
+    if (!context->getSettingsRef().enable_distributed_plan)
+    {
+        LOG_DEBUG(log, "Skip building distributed plan, because enable_distributed_plan=false.");
+        return;
+    }
+    /// Query hits directly on the store worker node.
     if (context->isInitialNode() && context->getRunningMode() == Context::RunningMode::STORE)
     {
-        LOG_DEBUG(log, "Skip building distributed plan.");
+        LOG_DEBUG(log, "Skip building distributed plan, because initial query hits directly on store worker.");
         return;
     }
 
     if (context->getInitialQueryId() == "zzzzzzzz-zzzz-zzzz-zzzz-zzzzzzzzzzzz")
     {
-        LOG_DEBUG(log, "Special initial query id, skip building distributed plan.");
+        LOG_DEBUG(log, "Skip building distributed plan, because reserved initial query id is ignored.");
         return;
     }
-
-    LOG_DEBUG(log, "Initial query id: {}, to be built to distributed plan.", context->getInitialQueryId());
 
     {
         /// Print the original query plan.
         WriteBufferFromOwnString buf;
-        buf << "------ Query Plan ------\n";
+        buf << "------ Original Query Plan ------\n";
         QueryPlan::ExplainPlanOptions options{.header = true, .actions = true};
         explainPlan(buf, options);
-        LOG_DEBUG(log, "After buildQueryPlan:\n{}", buf.str());
+        LOG_DEBUG(log, "Original query plan:\n{}", buf.str());
     }
+
+    LOG_DEBUG(log, "Build distributed plan for initial query id: {}.", context->getInitialQueryId());
 
     checkInitialized();
     if (context->isInitialNode())

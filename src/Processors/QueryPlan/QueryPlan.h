@@ -27,6 +27,7 @@ using QueryPlanPtr = std::unique_ptr<QueryPlan>;
 
 class Pipe;
 
+class JoinStep;
 class AggregatingStep;
 class SortingStep;
 class LimitStep;
@@ -63,6 +64,7 @@ public:
     void reset();
 
     void buildStages(ContextPtr context);       /// Used by initial node.
+    void debugStages();
     void scheduleStages(ContextPtr context);    /// Used by initial node.
     void buildPlanFragment(ContextPtr context); /// Used by non-initial nodes.
     void buildDistributedPlan(ContextPtr context);
@@ -112,6 +114,7 @@ public:
         QueryPlanStepPtr step;
         std::vector<Node *> children = {};
         Node * parent = nullptr;
+        int num_parent_stages = 0; /// Number of parent stages whose child is the stage current node belongs to.
         int num_leaf_nodes_in_stage = 0; /// Number of leaf nodes(including current node and its descendant nodes) in the same stage.
     };
 
@@ -125,7 +128,8 @@ public:
         std::vector<std::shared_ptr<String>> workers; /// Replicas that current stage should be executed on.
         std::vector<std::shared_ptr<String>> sinks; /// Child's workers.
         Node * root_node; /// Current stage's root node.
-        std::vector<Node *> leaf_nodes;
+        std::vector<Node *> leaf_nodes; /// Store leaf nodes which are from right side to left side.
+        bool is_leaf_stage = false; /// Current stage is a leaf stage if it has any leaf node reading data from storage(not from remote).
     };
 
     /// Note: do not use vector, otherwise pointers to elements in it will be invalidated when vector increases.
@@ -145,6 +149,7 @@ public:
     struct CheckShuffleResult
     {
         bool is_shuffle = false;
+        JoinStep * current_join_step = nullptr;
         AggregatingStep * child_aggregating_step = nullptr;
         SortingStep * child_sorting_step = nullptr;
         LimitStep * current_limit_step = nullptr;

@@ -8,6 +8,20 @@ namespace DB
 class DistributedSourceStep final : public ISourceStep
 {
 public:
+    /// Used for creating virtual plan node.
+    DistributedSourceStep(int stage_id_, int parent_stage_id_, ContextPtr context_)
+        : DistributedSourceStep(
+            Block{},
+            std::vector<std::shared_ptr<String>>{},
+            "",
+            stage_id_,
+            parent_stage_id_,
+            "",
+            false,
+            context_)
+    {
+    }
+
     DistributedSourceStep(
         Block header_,
         const std::vector<std::shared_ptr<String>> & sources_,

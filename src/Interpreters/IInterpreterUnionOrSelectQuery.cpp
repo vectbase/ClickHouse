@@ -19,6 +19,7 @@ QueryPipelineBuilder IInterpreterUnionOrSelectQuery::buildQueryPipeline()
     QueryPlan query_plan;
 
     buildQueryPlan(query_plan);
+
     context->setSelectQuery(queryToString(this->query_ptr));
     query_plan.buildDistributedPlan(context);
 
