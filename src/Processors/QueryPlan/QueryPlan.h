@@ -27,6 +27,7 @@ using QueryPlanPtr = std::unique_ptr<QueryPlan>;
 
 class Pipe;
 
+class UnionStep;
 class JoinStep;
 class AggregatingStep;
 class SortingStep;
@@ -149,6 +150,7 @@ public:
     struct CheckShuffleResult
     {
         bool is_shuffle = false;
+        UnionStep * current_union_step = nullptr;
         JoinStep * current_join_step = nullptr;
         AggregatingStep * child_aggregating_step = nullptr;
         SortingStep * child_sorting_step = nullptr;

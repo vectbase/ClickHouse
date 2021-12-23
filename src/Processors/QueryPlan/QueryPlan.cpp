@@ -12,6 +12,7 @@
 #include <Processors/QueryPlan/ReadFromMergeTree.h>
 #include <Processors/QueryPlan/ReadFromRemote.h>
 #include <Processors/QueryPlan/DistributedSourceStep.h>
+#include <Processors/QueryPlan/UnionStep.h>
 #include <Processors/QueryPlan/JoinStep.h>
 #include <Processors/Transforms/AggregatingTransform.h>
 #include <Processors/QueryPlan/AggregatingStep.h>
@@ -164,6 +165,14 @@ void QueryPlan::checkShuffle(Node * current_node, Node * child_node, CheckShuffl
     /// 2. current node is limit step, child node is sort step: no need shuffle.
     /// 3. current node is not limit step, child node is sort step: need shuffle.
     /// 4. child node is limit step: need shuffle.
+    result.current_union_step = dynamic_cast<UnionStep *>(current_node->step.get());
+    if (result.current_union_step)
+    {
+        LOG_DEBUG(log, "Check shuffle: child node is UnionStep");
+        result.is_shuffle = true;
+        return;
+    }
+
     result.current_join_step = dynamic_cast<JoinStep *>(current_node->step.get());
     if (result.current_join_step)
     {
@@ -416,7 +425,7 @@ void QueryPlan::scheduleStages(ContextPtr context)
     }
     LOG_DEBUG(log, "{} store workers, {} compute workers.", store_replicas.size(), compute_replicas.size());
     if (store_replicas.empty() || compute_replicas.empty())
-        throw Exception("No enough store workers({}) or compute workers({}).", store_replicas.size(), compute_replicas.size());
+        throw Exception(ErrorCodes::LOGICAL_ERROR, "No enough store workers({}) or compute workers({}).", store_replicas.size(), compute_replicas.size());
 
     static std::unordered_set<String> system_tables{"SystemClusters", "SystemDatabases", "SystemTables", "SystemColumns",
                                                     "SystemDictionaries", "SystemDataSkippingIndices",
@@ -697,6 +706,8 @@ void QueryPlan::buildPlanFragment(ContextPtr context)
                     addStep(std::move(distributed_source_step), "", new_node);
                     distributed_source_nodes.emplace_back(new_node); /// For debug
 
+                    /// If current step is JoinStep or UnionStep, only add DistributedSourceStep.
+
                     /// If parent stage has aggregate, add MergingAggregatedStep.
                     if (result.child_aggregating_step)
                     {
@@ -714,14 +725,14 @@ void QueryPlan::buildPlanFragment(ContextPtr context)
                         addStep(std::move(merging_aggregated), "Merge aggregated streams for distributed AGGREGATE", new_node);
                     }
 
-                    /// If parent stage has order by, add SortingStep
+                    /// If parent stage has order by, add SortingStep.
                     if (result.child_sorting_step)
                     {
                         auto merging_sorted = std::make_unique<SortingStep>(new_node->step->getOutputStream(), *result.child_sorting_step);
                         addStep(std::move(merging_sorted), "Merge sorted streams for distributed ORDER BY", new_node);
                     }
 
-                    /// If parent stage has limit, add LimitStep
+                    /// If parent stage has limit, add LimitStep.
                     if (result.child_limit_step)
                     {
                         assert(last_node->children.size() == 1);
