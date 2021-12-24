@@ -589,6 +589,7 @@ void QueryPlan::scheduleStages(ContextPtr context)
 
         /// Create query info.
         GRPCQueryInfo query_info;
+        query_info.set_database(context->getCurrentDatabase());
         query_info.set_output_format("Native");
         if (!context->getSelectQuery().empty())
             query_info.set_query(context->getSelectQuery()); /// For "insert into ... select"
