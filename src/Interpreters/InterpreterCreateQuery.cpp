@@ -242,6 +242,8 @@ BlockIO InterpreterCreateQuery::createDatabase(ASTCreateQuery & create)
         auto * ptr = typeid_cast<DatabaseReplicated *>(
             DatabaseCatalog::instance().getDatabase(getContext()->getConfigRef().getString("default_database", "default")).get());
         guard.reset();
+        if (!ptr)
+            throw Exception("The default database is not Replicated engine", ErrorCodes::LOGICAL_ERROR);
         return ptr->tryEnqueueReplicatedDDL(query_ptr, getContext());
     }
 

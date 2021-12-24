@@ -326,6 +326,8 @@ BlockIO InterpreterDropQuery::executeToDatabaseImpl(const ASTDropQuery & query, 
                 auto * ptr = typeid_cast<DatabaseReplicated *>(
                     DatabaseCatalog::instance().getDatabase(getContext()->getConfigRef().getString("default_database", "default")).get());
                 ddl_guard.reset();
+                if (!ptr)
+                    throw Exception("The default database is not Replicated engine", ErrorCodes::LOGICAL_ERROR);
                 return ptr->tryEnqueueReplicatedDDL(query_ptr, getContext());
             }
 
