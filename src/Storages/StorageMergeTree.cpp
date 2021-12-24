@@ -67,7 +67,8 @@ StorageMergeTree::StorageMergeTree(
     const String & date_column_name,
     const MergingParams & merging_params_,
     std::unique_ptr<MergeTreeSettings> storage_settings_,
-    bool has_force_restore_data_flag)
+    bool has_force_restore_data_flag,
+    StoragePtr embedded_distributed_)
     : MergeTreeData(
         table_id_,
         relative_data_path_,
@@ -83,6 +84,7 @@ StorageMergeTree::StorageMergeTree(
     , merger_mutator(*this,
         getContext()->getSettingsRef().background_merges_mutations_concurrency_ratio *
         getContext()->getSettingsRef().background_pool_size)
+    , embedded_distributed(embedded_distributed_)
 {
     loadDataParts(has_force_restore_data_flag);
 
@@ -230,6 +232,11 @@ std::optional<UInt64> StorageMergeTree::totalBytes(const Settings &) const
 SinkToStoragePtr
 StorageMergeTree::write(const ASTPtr & /*query*/, const StorageMetadataPtr & metadata_snapshot, ContextPtr local_context)
 {
+    if (getContext()->getRunningMode() == Context::RunningMode::COMPUTE)
+    {
+        return embedded_distributed->write(nullptr, metadata_snapshot, local_context);
+    }
+
     const auto & settings = local_context->getSettingsRef();
     return std::make_shared<MergeTreeSink>(
         *this, metadata_snapshot, settings.max_partitions_per_insert_block, local_context);
