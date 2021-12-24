@@ -270,9 +270,15 @@ BlockIO InterpreterDropQuery::executeToTemporaryTable(const String & table_name,
 
 BlockIO InterpreterDropQuery::executeToDatabase(const ASTDropQuery & query)
 {
+    if (query.database == getContext()->getConfigRef().getString("default_database", "default"))
+    {
+        throw Exception("The drop/truncate/detach operation is not allowed on default database", ErrorCodes::LOGICAL_ERROR);
+    }
+
     DatabasePtr database;
     std::vector<UUID> tables_to_wait;
     BlockIO res;
+
     try
     {
         res = executeToDatabaseImpl(query, database, tables_to_wait);
@@ -312,8 +318,23 @@ BlockIO InterpreterDropQuery::executeToDatabaseImpl(const ASTDropQuery & query, 
             bool drop = query.kind == ASTDropQuery::Kind::Drop;
             getContext()->checkAccess(AccessType::DROP_DATABASE, database_name);
 
-            if (query.kind == ASTDropQuery::Kind::Detach && query.permanently)
-                throw Exception("DETACH PERMANENTLY is not implemented for databases", ErrorCodes::NOT_IMPLEMENTED);
+             if (query.kind == ASTDropQuery::Kind::Detach)
+                 throw Exception("DETACH is not implemented for databases", ErrorCodes::NOT_IMPLEMENTED);
+
+            if (!getContext()->getClientInfo().is_replicated_database_internal)
+            {
+                auto * ptr = typeid_cast<DatabaseReplicated *>(
+                    DatabaseCatalog::instance().getDatabase(getContext()->getConfigRef().getString("default_database", "default")).get());
+                ddl_guard.reset();
+                return ptr->tryEnqueueReplicatedDDL(query_ptr, getContext());
+            }
+
+            if (getContext()->getClientInfo().is_replicated_database_internal)
+            {
+                auto * ptr = typeid_cast<DatabaseReplicated *>(
+                    DatabaseCatalog::instance().getDatabase(getContext()->getConfigRef().getString("default_database", "default")).get());
+                ptr->commitDatabase(getContext());
+            }
 
 #if USE_MYSQL
             if (database->getEngineName() == "MaterializedMySQL")

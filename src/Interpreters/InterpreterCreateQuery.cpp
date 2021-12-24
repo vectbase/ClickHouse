@@ -132,19 +132,22 @@ BlockIO InterpreterCreateQuery::createDatabase(ASTCreateQuery & create)
         create.attach_short_syntax = true;
         create.database = database_name;
     }
-    else if (!create.storage)
+    else if (!create.storage || create.storage->engine->name == "Replicated")
     {
         /// For new-style databases engine is explicitly specified in .sql
         /// When attaching old-style database during server startup, we must always use Ordinary engine
-        if (create.attach)
+        if (!create.storage && create.attach)
             throw Exception("Database engine must be specified for ATTACH DATABASE query", ErrorCodes::UNKNOWN_DATABASE_ENGINE);
-        bool old_style_database = getContext()->getSettingsRef().default_database_engine.value == DefaultDatabaseEngine::Ordinary;
         auto engine = std::make_shared<ASTFunction>();
         auto storage = std::make_shared<ASTStorage>();
-        engine->name = old_style_database ? "Ordinary" : "Atomic";
-        engine->no_empty_args = true;
+        auto args = std::make_shared<ASTExpressionList>();
+        args->children.emplace_back(std::make_shared<ASTLiteral>(String(fs::path(DEFAULT_ZOOKEEPER_METADATA_PATH) / create.database)));
+        args->children.emplace_back(std::make_shared<ASTLiteral>(String("{shard}")));
+        args->children.emplace_back(std::make_shared<ASTLiteral>(String("{replica}")));
+        engine->name = "Replicated";
+        engine->arguments = args;
         storage->set(storage->engine, engine);
-        create.set(create.storage, storage);
+        create.setOrReplace(create.storage, storage);
     }
     else if ((create.columns_list
               && ((create.columns_list->indices && !create.columns_list->indices->children.empty())
@@ -234,7 +237,22 @@ BlockIO InterpreterCreateQuery::createDatabase(ASTCreateQuery & create)
                         "Enable allow_experimental_database_materialized_postgresql to use it.", ErrorCodes::UNKNOWN_DATABASE_ENGINE);
     }
 
+    if (!getContext()->getClientInfo().is_replicated_database_internal && !internal)
+    {
+        auto * ptr = typeid_cast<DatabaseReplicated *>(
+            DatabaseCatalog::instance().getDatabase(getContext()->getConfigRef().getString("default_database", "default")).get());
+        guard.reset();
+        return ptr->tryEnqueueReplicatedDDL(query_ptr, getContext());
+    }
+
     DatabasePtr database = DatabaseFactory::get(create, metadata_path / "", getContext());
+
+    if (getContext()->getClientInfo().is_replicated_database_internal && !internal)
+    {
+        auto * ptr = typeid_cast<DatabaseReplicated *>(
+            DatabaseCatalog::instance().getDatabase(getContext()->getConfigRef().getString("default_database", "default")).get());
+        ptr->commitDatabase(getContext());
+    }
 
     if (create.uuid != UUIDHelpers::Nil)
         create.database = TABLE_WITH_UUID_NAME_PLACEHOLDER;

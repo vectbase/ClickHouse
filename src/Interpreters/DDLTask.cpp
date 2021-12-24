@@ -350,9 +350,8 @@ void DatabaseReplicatedTask::parseQueryFromEntry(ContextPtr context)
     DDLTaskBase::parseQueryFromEntry(context);
     if (auto * ddl_query = dynamic_cast<ASTQueryWithTableAndOutput *>(query.get()))
     {
-        /// Update database name with actual name of local database
-        assert(ddl_query->database.empty());
-        ddl_query->database = database->getDatabaseName();
+        if (!ddl_query->table.empty())
+            ddl_query->database = database->getDatabaseName();
     }
 }
 

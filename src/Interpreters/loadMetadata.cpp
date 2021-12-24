@@ -1,4 +1,5 @@
 #include <Common/ThreadPool.h>
+#include <Common/ZooKeeper/ZooKeeper.h>
 
 #include <Poco/DirectoryIterator.h>
 
@@ -162,6 +163,18 @@ void loadMetadata(ContextMutablePtr context, const String & default_database_nam
     bool metadata_dir_for_default_db_already_exists = databases.count(default_database_name);
     if (create_default_db_if_not_exists && !metadata_dir_for_default_db_already_exists)
         databases.emplace(default_database_name, std::filesystem::path(path) / escapeForFileName(default_database_name));
+
+    /// Load databases from metaService
+    {
+        auto zookeeper = context->getZooKeeper();
+        zookeeper->createAncestors(std::filesystem::path(DEFAULT_ZOOKEEPER_METADATA_PATH) / "");
+        auto db_names = zookeeper->getChildren(DEFAULT_ZOOKEEPER_METADATA_PATH);
+        for (auto & db_name : db_names)
+        {
+            if (!databases.contains(db_name))
+                databases.emplace(db_name, std::filesystem::path(path) / escapeForFileName(db_name));
+        }
+    }
 
     TablesLoader::Databases loaded_databases;
     for (const auto & [name, db_path] : databases)

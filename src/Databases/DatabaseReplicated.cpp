@@ -349,6 +349,8 @@ void DatabaseReplicated::checkQueryValid(const ASTPtr & query, ContextPtr query_
     /// Replicas will set correct name of current database in query context (database name can be different on replicas)
     if (auto * ddl_query = dynamic_cast<ASTQueryWithTableAndOutput *>(query.get()))
     {
+        if (ddl_query->table.empty())
+            return;
         if (ddl_query->database != getDatabaseName())
             throw Exception(ErrorCodes::UNKNOWN_DATABASE, "Database was renamed");
         ddl_query->database.clear();
@@ -817,6 +819,15 @@ void DatabaseReplicated::commitCreateTable(const ASTCreateQuery & query, const S
         txn->addOp(zkutil::makeCreateRequest(metadata_zk_path, statement, zkutil::CreateMode::Persistent));
     }
     DatabaseAtomic::commitCreateTable(query, table, table_metadata_tmp_path, table_metadata_path, query_context);
+}
+
+void DatabaseReplicated::commitDatabase(ContextPtr query_context)
+{
+    auto txn = query_context->getZooKeeperMetadataTransaction();
+    if (txn && txn->isInitialQuery())
+    {
+        txn->commit();
+    }
 }
 
 void DatabaseReplicated::commitAlterTable(const StorageID & table_id,

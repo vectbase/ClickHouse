@@ -27,6 +27,10 @@ InterpreterRenameQuery::InterpreterRenameQuery(const ASTPtr & query_ptr_, Contex
 BlockIO InterpreterRenameQuery::execute()
 {
     const auto & rename = query_ptr->as<const ASTRenameQuery &>();
+    if (rename.database)
+    {
+        throw Exception("RENAME database is not implemented yet", ErrorCodes::LOGICAL_ERROR);
+    }
 
     if (!rename.cluster.empty())
         return executeDDLQueryOnCluster(query_ptr, getContext(), getRequiredAccess());
