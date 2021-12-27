@@ -389,7 +389,7 @@ void QueryPlan::debugStages()
     LOG_DEBUG(log, "===> Print Stages:\n{}", buf.str());
 }
 
-void QueryPlan::scheduleStages(ContextPtr context)
+void QueryPlan::scheduleStages(ContextMutablePtr context)
 {
     LOG_DEBUG(log, "===> Schedule stages.");
     /// Use initial query id to build the plan fragment id.
@@ -446,12 +446,26 @@ void QueryPlan::scheduleStages(ContextPtr context)
             bool is_multi_points_data_source = false;
             for (const auto leaf_node : stage->leaf_nodes)
             {
-                /// It's a data source and not a system table.
-                if (leaf_node->children.empty() && !system_tables.contains(leaf_node->step->getStepDescription()))
+                /// It's a data source.
+                if (leaf_node->children.empty())
                 {
-                    LOG_DEBUG(log, "Leaf node {}({}) is multi-points data source.", leaf_node->step->getName(), leaf_node->step->getStepDescription());
-                    is_multi_points_data_source = true;
-                    break;
+                    if (system_tables.contains(leaf_node->step->getStepDescription())) /// It's system table.
+                    {
+                    }
+                    else if (leaf_node->step->getStepDescription() == "Values") /// It's StorageValues.
+                    {
+                        stage->has_view_source = true;
+                    }
+                    else
+                    {
+                        LOG_DEBUG(
+                            log,
+                            "Leaf node {}({}) is multi-points data source.",
+                            leaf_node->step->getName(),
+                            leaf_node->step->getStepDescription());
+                        is_multi_points_data_source = true;
+                        break;
+                    }
                 }
             }
             /// Fill workers.
@@ -598,6 +612,8 @@ void QueryPlan::scheduleStages(ContextPtr context)
         query_info.set_query_id(context->generateQueryId());
         query_info.set_initial_query_id(initial_query_id);
         query_info.set_stage_id(stage.id);
+        query_info.set_has_view_source(stage.has_view_source);
+
         for (const auto parent : stage.parents)
         {
             clickhouse::grpc::MapEntry entry;
@@ -614,6 +630,14 @@ void QueryPlan::scheduleStages(ContextPtr context)
         {
             query_info.set_node_id(*worker);
             LOG_DEBUG(log, "Remote plan fragment:\n{}", debugRemotePlanFragment(query_info.query(), *worker, initial_query_id, &stage));
+
+            if (stage.has_view_source)
+            {
+                const String & plan_fragment_id
+                    = query_info.initial_query_id() + "/" + toString(query_info.stage_id()) + "/" + query_info.node_id();
+                context->addPlanFragmentViewSource(plan_fragment_id, context->getViewSource());
+                LOG_DEBUG(log, "Add plan fragment view source.");
+            }
 
             GRPCClient cli(*worker);
             auto result = cli.executePlanFragment(query_info);
@@ -816,24 +840,24 @@ void QueryPlan::buildPlanFragment(ContextPtr context)
     }
 }
 
-void QueryPlan::buildDistributedPlan(ContextPtr context)
+bool QueryPlan::buildDistributedPlan(ContextMutablePtr context)
 {
     if (!context->getSettingsRef().enable_distributed_plan)
     {
         LOG_DEBUG(log, "Skip building distributed plan, because enable_distributed_plan=false.");
-        return;
+        return false;
     }
     /// Query hits directly on the store worker node.
     if (context->isInitialNode() && context->getRunningMode() == Context::RunningMode::STORE)
     {
         LOG_DEBUG(log, "Skip building distributed plan, because initial query hits directly on store worker.");
-        return;
+        return false;
     }
 
     if (context->getInitialQueryId() == "zzzzzzzz-zzzz-zzzz-zzzz-zzzzzzzzzzzz")
     {
         LOG_DEBUG(log, "Skip building distributed plan, because reserved initial query id is ignored.");
-        return;
+        return false;
     }
 
     {
@@ -845,12 +869,10 @@ void QueryPlan::buildDistributedPlan(ContextPtr context)
         LOG_DEBUG(log, "Original query plan:\n{}", buf.str());
     }
 
-    LOG_DEBUG(log, "Build distributed plan for initial query id: {}.", context->getInitialQueryId());
-
     checkInitialized();
+    optimize(QueryPlanOptimizationSettings::fromContext(context));
     if (context->isInitialNode())
     {
-        optimize(QueryPlanOptimizationSettings::fromContext(context));
         buildStages(context);
         scheduleStages(context);
     }
@@ -858,6 +880,7 @@ void QueryPlan::buildDistributedPlan(ContextPtr context)
     {
         buildPlanFragment(context);
     }
+    return true;
 }
 
 String QueryPlan::debugLocalPlanFragment(const String & query_id, int stage_id, const String & node_id, const std::vector<Node *> distributed_source_nodes)

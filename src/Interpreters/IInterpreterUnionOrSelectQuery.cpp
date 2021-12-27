@@ -21,11 +21,11 @@ QueryPipelineBuilder IInterpreterUnionOrSelectQuery::buildQueryPipeline()
     buildQueryPlan(query_plan);
 
     context->setSelectQuery(queryToString(this->query_ptr));
-    query_plan.buildDistributedPlan(context);
+    bool is_built = query_plan.buildDistributedPlan(context);
 
-    QueryPlanOptimizationSettings do_not_optimize_plan{.optimize_plan = false};
+    QueryPlanOptimizationSettings optimization_settings{.optimize_plan = !is_built};
     return std::move(*query_plan.buildQueryPipeline(
-            do_not_optimize_plan, BuildQueryPipelineSettings::fromContext(context)));
+        optimization_settings, BuildQueryPipelineSettings::fromContext(context)));
 }
 
 }

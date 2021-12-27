@@ -1164,13 +1164,22 @@ namespace
             {
                 sinks.emplace_back(std::make_shared<String>(sink));
             }
-            Context::QueryPlanFragmentInfo fragmentInfo{
+            Context::QueryPlanFragmentInfo fragment_info{
                 .initial_query_id = query_info.initial_query_id(),
                 .stage_id = query_info.stage_id(),
                 .node_id = query_info.node_id(),
                 .parent_sources = std::move(parent_sources),
                 .sinks = sinks };
-            query_context->setQueryPlanFragmentInfo(std::move(fragmentInfo));
+            query_context->setQueryPlanFragmentInfo(std::move(fragment_info));
+
+            if (query_info.has_view_source())
+            {
+                const String & plan_fragment_id
+                    = fragment_info.initial_query_id + "/" + toString(fragment_info.stage_id) + "/" + fragment_info.node_id;
+                LOG_DEBUG(log, "Get plan fragment view source for {}", plan_fragment_id);
+                const auto & view_source = query_context->getPlanFragmentViewSource(plan_fragment_id);
+                query_context->addViewSource(view_source);
+            }
         }
 
         /// Prepare settings.

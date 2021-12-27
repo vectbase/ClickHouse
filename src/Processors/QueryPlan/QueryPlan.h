@@ -66,9 +66,9 @@ public:
 
     void buildStages(ContextPtr context);       /// Used by initial node.
     void debugStages();
-    void scheduleStages(ContextPtr context);    /// Used by initial node.
+    void scheduleStages(ContextMutablePtr context);    /// Used by initial node.
     void buildPlanFragment(ContextPtr context); /// Used by non-initial nodes.
-    void buildDistributedPlan(ContextPtr context);
+    bool buildDistributedPlan(ContextMutablePtr context);
 
     QueryPipelineBuilderPtr buildQueryPipeline(
         const QueryPlanOptimizationSettings & optimization_settings,
@@ -131,6 +131,7 @@ public:
         Node * root_node; /// Current stage's root node.
         std::vector<Node *> leaf_nodes; /// Store leaf nodes which are from right side to left side.
         bool is_leaf_stage = false; /// Current stage is a leaf stage if it has any leaf node reading data from storage(not from remote).
+        bool has_view_source = false; /// Current stage reads data to trigger materialized view.
     };
 
     /// Note: do not use vector, otherwise pointers to elements in it will be invalidated when vector increases.

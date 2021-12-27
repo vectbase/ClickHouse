@@ -525,6 +525,8 @@ public:
 
     void addViewSource(const StoragePtr & storage);
     StoragePtr getViewSource() const;
+    void addPlanFragmentViewSource(const String & plan_fragment_id, const StoragePtr & storage);
+    StoragePtr getPlanFragmentViewSource(const String & plan_fragment_id) const;
 
     String getCurrentDatabase() const;
     String getCurrentQueryId() const { return client_info.current_query_id; }

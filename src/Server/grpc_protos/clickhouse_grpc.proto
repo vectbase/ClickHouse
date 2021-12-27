@@ -123,6 +123,7 @@ message QueryInfo {
    map<int32, MapEntry> parent_sources = 22;
    /// Format is "replica_name:grpc_port"
    repeated string sinks = 24;
+   bool has_view_source = 25;
 }
 
 enum LogsLevel {

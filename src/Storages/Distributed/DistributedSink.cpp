@@ -127,7 +127,7 @@ DistributedSink::DistributedSink(
     , insert_timeout(insert_timeout_)
     , main_table(main_table_)
     , columns_to_send(columns_to_send_.begin(), columns_to_send_.end())
-    , log(&Poco::Logger::get("DistributedBlockOutputStream"))
+    , log(&Poco::Logger::get("DistributedSink(" + main_table.getFullNameNotQuoted() + ")"))
 {
     const auto & settings = context->getSettingsRef();
     if (settings.max_distributed_depth && context->getClientInfo().distributed_depth > settings.max_distributed_depth)

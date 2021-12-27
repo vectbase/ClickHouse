@@ -149,6 +149,7 @@ struct ContextSharedPart
     mutable std::mutex external_dictionaries_mutex;
     mutable std::mutex external_user_defined_executable_functions_mutex;
     mutable std::mutex external_models_mutex;
+    mutable std::mutex view_sources_mutex;
     /// Separate mutex for storage policies. During server startup we may
     /// initialize some important storages (system logs with MergeTree engine)
     /// under context lock.
@@ -188,6 +189,7 @@ struct ContextSharedPart
     mutable std::optional<ExternalDictionariesLoader> external_dictionaries_loader;
     mutable std::optional<ExternalUserDefinedExecutableFunctionsLoader> external_user_defined_executable_functions_loader;
     mutable std::optional<ExternalModelsLoader> external_models_loader;
+    std::unordered_map<String, StoragePtr> view_sources;
 
     ExternalLoaderXMLConfigRepository * external_models_config_repository = nullptr;
     scope_guard models_repository_guard;
@@ -1055,6 +1057,23 @@ void Context::addViewSource(const StoragePtr & storage)
 StoragePtr Context::getViewSource() const
 {
     return view_source;
+}
+
+void Context::addPlanFragmentViewSource(const String & plan_fragment_id, const StoragePtr & storage)
+{
+    std::lock_guard lock(shared->view_sources_mutex);
+    shared->view_sources[plan_fragment_id] = storage;
+}
+
+StoragePtr Context::getPlanFragmentViewSource(const String & plan_fragment_id) const
+{
+    std::lock_guard lock(shared->view_sources_mutex);
+    auto it = shared->view_sources.find(plan_fragment_id);
+    if (it == shared->view_sources.end())
+        throw Exception(ErrorCodes::BAD_GET, "There is no view source for {}", plan_fragment_id);
+    StoragePtr ret_view_source = it->second;
+    shared->view_sources.erase(it);
+    return ret_view_source;
 }
 
 Settings Context::getSettings() const
