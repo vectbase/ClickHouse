@@ -4317,7 +4317,7 @@ void StorageReplicatedMergeTree::assertNotReadonly() const
 
 SinkToStoragePtr StorageReplicatedMergeTree::write(const ASTPtr & /*query*/, const StorageMetadataPtr & metadata_snapshot, ContextPtr local_context)
 {
-    if (getContext()->getRunningMode() == Context::RunningMode::COMPUTE)
+    if (getContext()->getRunningMode() == Context::RunningMode::COMPUTE && getStorageID().getDatabaseName() != DatabaseCatalog::SYSTEM_DATABASE)
     {
         return embedded_distributed->write(nullptr, metadata_snapshot, local_context);
     }
