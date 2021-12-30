@@ -438,6 +438,8 @@ void QueryPlan::scheduleStages(ContextMutablePtr context)
                                                     "SystemNumbers", "SystemOne", "SystemZeros",
                                                     "SystemContributors", "SystemLicenses"};
 
+    static std::unordered_set<String> special_storages{"HDFS", "S3", "MySQL", "Input"};
+
     auto fillStage = [&store_replicas, &compute_replicas, this, &my_replica](Stage * stage)
     {
         /// Leaf stage.
@@ -449,10 +451,13 @@ void QueryPlan::scheduleStages(ContextMutablePtr context)
                 /// It's a data source.
                 if (leaf_node->children.empty())
                 {
-                    if (system_tables.contains(leaf_node->step->getStepDescription())) /// It's system table.
+                    /// It's system table or special storage.
+                    if (system_tables.contains(leaf_node->step->getStepDescription()) ||
+                        special_storages.contains(leaf_node->step->getStepDescription()))
                     {
                     }
-                    else if (leaf_node->step->getStepDescription() == "Values") /// It's StorageValues.
+                    /// It's StorageValues.
+                    else if (leaf_node->step->getStepDescription() == "Values")
                     {
                         stage->has_view_source = true;
                     }
