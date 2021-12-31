@@ -438,7 +438,7 @@ void QueryPlan::scheduleStages(ContextMutablePtr context)
                                                     "SystemNumbers", "SystemOne", "SystemZeros",
                                                     "SystemContributors", "SystemLicenses"};
 
-    static std::unordered_set<String> special_storages{"HDFS", "S3", "MySQL", "Input"};
+    static std::unordered_set<String> special_storages{"HDFS", "S3", "MySQL"};
 
     auto fillStage = [&store_replicas, &compute_replicas, this, &my_replica](Stage * stage)
     {
@@ -460,6 +460,10 @@ void QueryPlan::scheduleStages(ContextMutablePtr context)
                     else if (leaf_node->step->getStepDescription() == "Values")
                     {
                         stage->has_view_source = true;
+                    }
+                    else if (leaf_node->step->getStepDescription() == "Input")
+                    {
+                        stage->has_input_function = true;
                     }
                     else
                     {
@@ -618,6 +622,7 @@ void QueryPlan::scheduleStages(ContextMutablePtr context)
         query_info.set_initial_query_id(initial_query_id);
         query_info.set_stage_id(stage.id);
         query_info.set_has_view_source(stage.has_view_source);
+        query_info.set_has_input_function(stage.has_input_function);
 
         for (const auto parent : stage.parents)
         {
@@ -636,12 +641,12 @@ void QueryPlan::scheduleStages(ContextMutablePtr context)
             query_info.set_node_id(*worker);
             LOG_DEBUG(log, "Remote plan fragment:\n{}", debugRemotePlanFragment(query_info.query(), *worker, initial_query_id, &stage));
 
-            if (stage.has_view_source)
+            if (stage.has_view_source || stage.has_input_function)
             {
                 const String & plan_fragment_id
                     = query_info.initial_query_id() + "/" + toString(query_info.stage_id()) + "/" + query_info.node_id();
-                context->addPlanFragmentViewSource(plan_fragment_id, context->getViewSource());
-                LOG_DEBUG(log, "Add plan fragment view source.");
+                context->addInitialQueryContext(plan_fragment_id, context->getQueryContext());
+                LOG_DEBUG(log, "Store initial query context for plan fragment {}, because has {}.", plan_fragment_id, (stage.has_view_source ? "view source" : "input function"));
             }
 
             GRPCClient cli(*worker);
@@ -853,7 +858,7 @@ bool QueryPlan::buildDistributedPlan(ContextMutablePtr context)
         return false;
     }
     /// Query hits directly on the store worker node.
-    if (context->isInitialNode() && context->getRunningMode() == Context::RunningMode::STORE)
+    if (context->isInitialQuery() && context->getRunningMode() == Context::RunningMode::STORE)
     {
         LOG_DEBUG(log, "Skip building distributed plan, because initial query hits directly on store worker.");
         return false;
@@ -876,7 +881,7 @@ bool QueryPlan::buildDistributedPlan(ContextMutablePtr context)
 
     checkInitialized();
     optimize(QueryPlanOptimizationSettings::fromContext(context));
-    if (context->isInitialNode())
+    if (context->isInitialQuery())
     {
         buildStages(context);
         scheduleStages(context);

@@ -514,7 +514,7 @@ public:
     const QueryFactoriesInfo & getQueryFactoriesInfo() const { return query_factories_info; }
     void addQueryFactoriesInfo(QueryLogFactories factory_type, const String & created_object) const;
 
-    bool isInitialNode() const { return !query_plan_fragment_info; }
+    bool isInitialQuery() const { return !query_plan_fragment_info; }
     const QueryPlanFragmentInfo & getQueryPlanFragmentInfo() const { return query_plan_fragment_info.value(); }
     void setQueryPlanFragmentInfo(const QueryPlanFragmentInfo & query_plan_fragment_info_) { query_plan_fragment_info = query_plan_fragment_info_; }
 
@@ -525,8 +525,10 @@ public:
 
     void addViewSource(const StoragePtr & storage);
     StoragePtr getViewSource() const;
-    void addPlanFragmentViewSource(const String & plan_fragment_id, const StoragePtr & storage);
-    StoragePtr getPlanFragmentViewSource(const String & plan_fragment_id) const;
+
+    void addInitialQueryContext(const String & plan_fragment_id, const ContextPtr context);
+    ContextPtr getInitialQueryContext(const String & plan_fragment_id) const;
+    bool isStandaloneMode() const;
 
     String getCurrentDatabase() const;
     String getCurrentQueryId() const { return client_info.current_query_id; }

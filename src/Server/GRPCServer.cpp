@@ -1171,15 +1171,6 @@ namespace
                 .parent_sources = std::move(parent_sources),
                 .sinks = sinks };
             query_context->setQueryPlanFragmentInfo(std::move(fragment_info));
-
-            if (query_info.has_view_source())
-            {
-                const String & plan_fragment_id
-                    = fragment_info.initial_query_id + "/" + toString(fragment_info.stage_id) + "/" + fragment_info.node_id;
-                LOG_DEBUG(log, "Get plan fragment view source for {}", plan_fragment_id);
-                const auto & view_source = query_context->getPlanFragmentViewSource(plan_fragment_id);
-                query_context->addViewSource(view_source);
-            }
         }
 
         /// Prepare settings.
@@ -1263,25 +1254,46 @@ namespace
             createExternalTables();
         });
 
-        /// Set callbacks to execute function input().
-        query_context->setInputInitializer([this] (ContextPtr context, const StoragePtr & input_storage)
+        if (call_type == CALL_EXECUTE_PLAN_FRAGMENT)
         {
-            if (context != query_context)
-                throw Exception("Unexpected context in Input initializer", ErrorCodes::LOGICAL_ERROR);
-            input_function_is_used = true;
-            initializeBlockInputStream(input_storage->getInMemoryMetadataPtr()->getSampleBlock());
-        });
+            const String & plan_fragment_id
+                = query_info.initial_query_id() + "/" + toString(query_info.stage_id()) + "/" + query_info.node_id();
 
-        query_context->setInputBlocksReaderCallback([this](ContextPtr context) -> Block
+            if (query_info.has_view_source() || query_info.has_input_function())
+            {
+                const auto & initial_query_context = query_context->getInitialQueryContext(plan_fragment_id);
+                if (query_info.has_view_source())
+                {
+                    LOG_DEBUG(log, "Restore view source for plan fragment {}", plan_fragment_id);
+                    query_context->addViewSource(initial_query_context->getViewSource());
+                }
+                else if (query_info.has_input_function())
+                {
+                    query_context->setQueryContext(std::const_pointer_cast<Context>(initial_query_context));
+                }
+            }
+        }
+        else
         {
-            if (context != query_context)
-                throw Exception("Unexpected context in InputBlocksReader", ErrorCodes::LOGICAL_ERROR);
+            /// Set callbacks to execute function input().
+            query_context->setInputInitializer([this](ContextPtr context, const StoragePtr & input_storage) {
+                if (context != query_context)
+                    throw Exception("Unexpected context in Input initializer", ErrorCodes::LOGICAL_ERROR);
+                input_function_is_used = true;
+                initializeBlockInputStream(input_storage->getInMemoryMetadataPtr()->getSampleBlock());
+            });
 
-            Block block;
-            while (!block && pipeline_executor->pull(block));
+            query_context->setInputBlocksReaderCallback([this](ContextPtr context) -> Block {
+                if (context != query_context)
+                    throw Exception("Unexpected context in InputBlocksReader", ErrorCodes::LOGICAL_ERROR);
 
-            return block;
-        });
+                Block block;
+                while (!block && pipeline_executor->pull(block))
+                    ;
+
+                return block;
+            });
+        }
 
         /// Start executing the query.
         const auto * query_end = end;

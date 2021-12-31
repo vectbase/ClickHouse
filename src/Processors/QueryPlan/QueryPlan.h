@@ -132,6 +132,7 @@ public:
         std::vector<Node *> leaf_nodes; /// Store leaf nodes which are from right side to left side.
         bool is_leaf_stage = false; /// Current stage is a leaf stage if it has any leaf node reading data from storage(not from remote).
         bool has_view_source = false; /// Current stage reads data to trigger materialized view.
+        bool has_input_function = false;
     };
 
     /// Note: do not use vector, otherwise pointers to elements in it will be invalidated when vector increases.
