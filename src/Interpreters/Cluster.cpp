@@ -723,8 +723,8 @@ bool Cluster::maybeCrossReplication() const
     return false;
 }
 
-ClustersWatcher::ClustersWatcher(const std::string & clusters_path_, ContextPtr context_, const String & logger_name_)
-    : context(Context::createCopy(context_)), log(&Poco::Logger::get(logger_name_))
+ClustersWatcher::ClustersWatcher(const std::string & clusters_path_, ContextPtr context_)
+    : context(Context::createCopy(context_)), log(&Poco::Logger::get("ClustersWatcher"))
 {
     clusters_path = clusters_path_;
     if (clusters_path.back() == '/')

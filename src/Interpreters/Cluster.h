@@ -308,8 +308,7 @@ protected:
 class ClustersWatcher
 {
 public:
-    ClustersWatcher(const std::string & clusters_path_, ContextPtr context_,
-                    const String & logger_name_ = "ClustersWatcher");
+    ClustersWatcher(const std::string & clusters_path_, ContextPtr context_);
 
     void startup();
     void shutdown() { task->deactivate(); }

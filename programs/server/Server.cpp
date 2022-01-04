@@ -1562,12 +1562,12 @@ if (ThreadFuzzer::instance().isEffective())
                                                                      &CurrentMetrics::MaxDDLEntryID, &CurrentMetrics::MaxPushedDDLEntryID));
         }
 
+        /// Register with clickhouse-keeper and watch on clusters change.
+        global_context->setClustersWatcher(std::make_unique<ClustersWatcher>(DEFAULT_ZOOKEEPER_CLUSTERS_PATH, global_context));
+
         for (auto & server : *servers)
             server.start();
         LOG_INFO(log, "Ready for connections.");
-
-        /// Register with clickhouse-keeper and watch on clusters change
-        global_context->setClustersWatcher(std::make_unique<ClustersWatcher>(DEFAULT_ZOOKEEPER_CLUSTERS_PATH, global_context, "ClustersWatcher"));
 
         SCOPE_EXIT_SAFE({
             LOG_DEBUG(log, "Received termination signal.");
