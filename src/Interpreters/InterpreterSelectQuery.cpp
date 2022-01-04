@@ -1748,7 +1748,8 @@ void InterpreterSelectQuery::executeFetchColumns(QueryProcessingStage::Enum proc
 
     /// Optimization for trivial query like SELECT count() FROM table.
     bool optimize_trivial_count =
-        syntax_analyzer_result->optimize_trivial_count
+        context->getRunningMode() == Context::RunningMode::STORE
+        && syntax_analyzer_result->optimize_trivial_count
         && (settings.max_parallel_replicas <= 1)
         && storage
         && storage->getName() != "MaterializedMySQL"
@@ -1807,8 +1808,13 @@ void InterpreterSelectQuery::executeFetchColumns(QueryProcessingStage::Enum proc
             auto prepared_count = std::make_unique<ReadFromPreparedSource>(Pipe(std::move(source)), context);
             prepared_count->setStepDescription("Optimized trivial count");
             query_plan.addStep(std::move(prepared_count));
-            from_stage = QueryProcessingStage::WithMergeableState;
-            analysis_result.first_stage = false;
+            if (context->isInitialQuery())
+            {
+                /// If initial query is running on store worker, skip first stage.
+                from_stage = QueryProcessingStage::WithMergeableState;
+                analysis_result.first_stage = false;
+            }
+            analysis_result.optimize_trivial_count = true;
             return;
         }
     }
@@ -2071,7 +2077,9 @@ void InterpreterSelectQuery::executeAggregation(QueryPlan & query_plan, const Ac
         settings.max_threads,
         settings.min_free_disk_space_for_temporary_data,
         settings.compile_aggregate_expressions,
-        settings.min_count_to_compile_aggregate_expression);
+        settings.min_count_to_compile_aggregate_expression,
+        {},
+        analysis_result.optimize_trivial_count);
 
     SortDescription group_by_sort_description;
 

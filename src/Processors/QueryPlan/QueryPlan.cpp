@@ -794,16 +794,24 @@ void QueryPlan::buildPlanFragment(ContextPtr context)
                         node->step = std::move(step);
                     };
 
+                    /// If child is AggregatingStep.
                     if (result.child_aggregating_step)
                     {
-                        auto aggregating_step = std::make_unique<AggregatingStep>(*result.child_aggregating_step);
+                        /// If NOT optimize trivial count, replace AggregatingStep with final=false.
+                        if (!result.child_aggregating_step->getParams().optimize_trivial_count)
                         {
+                            auto aggregating_step = std::make_unique<AggregatingStep>(*result.child_aggregating_step);
                             replaceStep(std::move(aggregating_step), last_node);
                         }
+                        /// If optimize trivial count, remove AggregatingStep.
+                        else
+                        {
+                            LOG_DEBUG(log, "Remove step: {}, stage: {}", result.child_aggregating_step->getName(), stage_id);
+                            last_node = last_node->children[0];
+                        }
                     }
-
                     /// If limit step is pushed down, collect (limit + offset) rows.
-                    if (result.child_limit_step)
+                    else if (result.child_limit_step)
                         result.child_limit_step->resetLimitAndOffset();
 
                     root = last_node;

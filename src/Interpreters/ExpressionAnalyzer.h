@@ -219,6 +219,8 @@ struct ExpressionAnalysisResult
     bool optimize_read_in_order = false;
     bool optimize_aggregation_in_order = false;
     bool join_has_delayed_stream = false;
+    /// Whether trivial count has been optimized.
+    bool optimize_trivial_count = false;
 
     ActionsDAGPtr before_array_join;
     ArrayJoinActionPtr array_join;
