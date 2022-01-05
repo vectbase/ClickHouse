@@ -1038,7 +1038,7 @@ namespace
         {
             if (call_type == CALL_EXECUTE_PLAN_FRAGMENT)
             {
-                setThreadName("GRPCServerExecutePlanFragment");
+                setThreadName("GRPCExecPlan");
 
                 /// Include two steps:
                 /// 1.Store query info.
@@ -1053,7 +1053,7 @@ namespace
             }
             else if (call_type == CALL_FETCH_PLAN_FRAGMENT_RESULT)
             {
-                setThreadName("GRPCServerFetchPlanFragmentResult");
+                setThreadName("GRPCFetchResult");
                 receiveTicket();
                 loadQueryInfoWrapper();
                 executeQuery();
@@ -1062,7 +1062,7 @@ namespace
             }
             else if (call_type == CALL_CANCEL_PLAN_FRAGMENT)
             {
-                setThreadName("GRPCServerCancelPlanFragment");
+                setThreadName("GRPCCancelPlan");
                 receiveTicket();
                 loadQueryInfoWrapper(true);
                 if (query_info_wrapper)
