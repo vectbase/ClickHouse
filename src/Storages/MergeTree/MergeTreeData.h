@@ -365,6 +365,8 @@ public:
                   bool attach,
                   BrokenPartCallback broken_part_callback_ = [](const String &){});
 
+    bool isRemote() const override { return true; }
+
     /// Build a block of minmax and count values of a MergeTree table. These values are extracted
     /// from minmax_indices, the first expression of primary key, and part rows.
     ///

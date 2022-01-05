@@ -1237,6 +1237,7 @@ bool MutateTask::execute()
 
 bool MutateTask::prepare()
 {
+    LOG_DEBUG(&Poco::Logger::get("MutateTask"), "======== prepare");
     MutationHelpers::checkOperationIsNotCanceled(*ctx->merges_blocker, ctx->mutate_entry);
 
     if (ctx->future_part->parts.size() != 1)
@@ -1253,32 +1254,35 @@ bool MutateTask::prepare()
     /// Allow mutations to work when force_index_by_date or force_primary_key is on.
     context_for_reading->setSetting("force_index_by_date", false);
     context_for_reading->setSetting("force_primary_key", false);
-
+    LOG_DEBUG(&Poco::Logger::get("MutateTask"), "======== prepare: ----- 0");
     for (const auto & command : *ctx->commands)
     {
         if (command.partition == nullptr || ctx->future_part->parts[0]->info.partition_id == ctx->data->getPartitionIDFromQuery(
                 command.partition, context_for_reading))
             ctx->commands_for_part.emplace_back(command);
     }
-
+    LOG_DEBUG(&Poco::Logger::get("MutateTask"), "======== prepare: ----- 0.1");
     if (ctx->source_part->isStoredOnDisk() && !isStorageTouchedByMutations(
         storage_from_source_part, ctx->metadata_snapshot, ctx->commands_for_part, Context::createCopy(context_for_reading)))
     {
+        LOG_DEBUG(&Poco::Logger::get("MutateTask"), "======== prepare: ----- 0.1.1");
         LOG_TRACE(ctx->log, "Part {} doesn't change up to mutation version {}", ctx->source_part->name, ctx->future_part->part_info.mutation);
         promise.set_value(ctx->data->cloneAndLoadDataPartOnSameDisk(ctx->source_part, "tmp_clone_", ctx->future_part->part_info, ctx->metadata_snapshot));
         return false;
     }
     else
     {
+        LOG_DEBUG(&Poco::Logger::get("MutateTask"), "======== prepare: ----- 0.1.2");
         LOG_TRACE(ctx->log, "Mutating part {} to mutation version {}", ctx->source_part->name, ctx->future_part->part_info.mutation);
     }
-
+    LOG_DEBUG(&Poco::Logger::get("MutateTask"), "======== prepare: ----- 0.2");
     MutationHelpers::splitMutationCommands(ctx->source_part, ctx->commands_for_part, ctx->for_interpreter, ctx->for_file_renames);
 
     ctx->stage_progress = std::make_unique<MergeStageProgress>(1.0);
-
+    LOG_DEBUG(&Poco::Logger::get("MutateTask"), "======== prepare: ----- 1");
     if (!ctx->for_interpreter.empty())
     {
+        LOG_DEBUG(&Poco::Logger::get("MutateTask"), "======== prepare: !ctx->for_interpreter.empty()");
         ctx->interpreter = std::make_unique<MutationsInterpreter>(
             storage_from_source_part, ctx->metadata_snapshot, ctx->for_interpreter, context_for_reading, true);
         ctx->materialized_indices = ctx->interpreter->grabMaterializedIndices();
@@ -1315,7 +1319,7 @@ bool MutateTask::prepare()
     const auto data_settings = ctx->data->  getSettings();
     ctx->need_sync = needSyncPart(ctx->source_part->rows_count, ctx->source_part->getBytesOnDisk(), *data_settings);
     ctx->execute_ttl_type = ExecuteTTLType::NONE;
-
+    LOG_DEBUG(&Poco::Logger::get("MutateTask"), "======== prepare: ----- 2");
     if (ctx->mutating_pipeline.initialized())
         ctx->execute_ttl_type = MergeTreeDataMergerMutator::shouldExecuteTTL(ctx->metadata_snapshot, ctx->interpreter->getColumnDependencies());
 
@@ -1325,11 +1329,12 @@ bool MutateTask::prepare()
     if (!isWidePart(ctx->source_part)
         || (ctx->mutation_kind == MutationsInterpreter::MutationKind::MUTATE_OTHER && ctx->interpreter && ctx->interpreter->isAffectingAllColumns()))
     {
+        LOG_DEBUG(&Poco::Logger::get("MutateTask"), "======== prepare: create MutateAllPartColumnsTask");
         task = std::make_unique<MutateAllPartColumnsTask>(ctx);
     }
     else /// TODO: check that we modify only non-key columns in this case.
     {
-
+        LOG_DEBUG(&Poco::Logger::get("MutateTask"), "======== prepare: ----- 3");
         /// We will modify only some of the columns. Other columns and key values can be copied as-is.
         for (const auto & name_type : ctx->updated_header.getNamesAndTypesList())
             ctx->updated_columns.emplace(name_type.name);
@@ -1356,7 +1361,7 @@ bool MutateTask::prepare()
             promise.set_value(ctx->data->cloneAndLoadDataPartOnSameDisk(ctx->source_part, "tmp_clone_", ctx->future_part->part_info, ctx->metadata_snapshot));
             return false;
         }
-
+        LOG_DEBUG(&Poco::Logger::get("MutateTask"), "======== prepare: create MutateSomePartColumnsTask");
         task = std::make_unique<MutateSomePartColumnsTask>(ctx);
     }
 

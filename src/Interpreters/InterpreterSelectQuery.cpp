@@ -9,6 +9,7 @@
 #include <Parsers/ASTTablesInSelectQuery.h>
 #include <Parsers/ExpressionListParsers.h>
 #include <Parsers/parseQuery.h>
+#include <Parsers/queryToString.h>
 
 #include <Access/AccessFlags.h>
 #include <Access/ContextAccess.h>
@@ -438,6 +439,10 @@ InterpreterSelectQuery::InterpreterSelectQuery(
             std::move(subquery_for_sets),
             std::move(prepared_sets));
 
+        /// Process SQL just like "SELECT ... FROM _temporary_and_external_tables.`_tmp_fbe82e3a-1815-4563-bbe8-2e3a1815e563`"
+        if (!query_analyzer->getExternalTables().empty())
+            context->setSkipDistributedPlan(true);
+
         if (!options.only_analyze)
         {
             if (query.sampleSize() && (input_pipe || !storage || !storage->supportsSampling()))
@@ -456,7 +461,10 @@ InterpreterSelectQuery::InterpreterSelectQuery(
             /// Save the new temporary tables in the query context
             for (const auto & it : query_analyzer->getExternalTables())
                 if (!context->tryResolveStorageID({"", it.first}, Context::ResolveExternal))
+                {
                     context->addExternalTable(it.first, std::move(*it.second));
+                    LOG_DEBUG(log, "Add external table to context {}", static_cast<void*>(context.get()));
+                }
         }
 
         if (!options.only_analyze || options.modify_inplace)
@@ -499,6 +507,10 @@ InterpreterSelectQuery::InterpreterSelectQuery(
 
         /// Calculate structure of the result.
         result_header = getSampleBlockImpl();
+        /// Maybe subquery has been rewritten with "_subqueryX", so reset distributed_query.
+        String maybe_rewritten_query = queryToString(query_ptr);
+        LOG_DEBUG(log, "[{}] Rewrite \"{}\" to \"{}\"", static_cast<void*>(context.get()), context->getClientInfo().distributed_query, maybe_rewritten_query);
+        context->getClientInfo().distributed_query = std::move(maybe_rewritten_query);
     };
 
     analyze(shouldMoveToPrewhere());
@@ -1515,7 +1527,7 @@ void InterpreterSelectQuery::addEmptySourceToQueryPlan(
 
     auto read_from_pipe = std::make_unique<ReadFromPreparedSource>(std::move(pipe));
     read_from_pipe->setStepDescription("Read from NullSource");
-    query_plan.addStep(std::move(read_from_pipe));
+    query_plan.addStep(std::move(read_from_pipe), context_);
 
     if (query_info.projection)
     {

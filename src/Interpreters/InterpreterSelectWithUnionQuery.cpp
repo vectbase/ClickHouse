@@ -34,6 +34,7 @@ InterpreterSelectWithUnionQuery::InterpreterSelectWithUnionQuery(
         const ASTPtr & query_ptr_, ContextPtr context_,
         const SelectQueryOptions & options_, const Names & required_result_column_names)
     : IInterpreterUnionOrSelectQuery(query_ptr_, context_, options_)
+    , log(&Poco::Logger::get("InterpreterSelectWithUnionQuery"))
 {
     ASTSelectWithUnionQuery * ast = query_ptr->as<ASTSelectWithUnionQuery>();
     bool require_full_header = ast->hasNonDefaultUnionMode();
@@ -166,6 +167,32 @@ InterpreterSelectWithUnionQuery::InterpreterSelectWithUnionQuery(
     options.ignore_limits |= all_nested_ignore_limits;
     options.ignore_quota |= all_nested_ignore_quota;
 
+    context->getClientInfo().distributed_query.clear();
+    for (size_t query_num = 0; query_num < num_children; ++query_num)
+    {
+        context->getClientInfo().distributed_query += nested_interpreters[query_num]->getContext()->getClientInfo().distributed_query;
+
+        if (query_num < num_children - 1)
+        {
+            if (ast->union_mode == ASTSelectWithUnionQuery::Mode::Unspecified)
+            {
+                context->getClientInfo().distributed_query += " UNION ";
+            }
+            else if (ast->union_mode == ASTSelectWithUnionQuery::Mode::ALL)
+            {
+                context->getClientInfo().distributed_query += " UNION ALL ";
+            }
+            else if (ast->union_mode == ASTSelectWithUnionQuery::Mode::DISTINCT)
+            {
+                context->getClientInfo().distributed_query += " UNION DISTINCT ";
+            }
+            else
+            {
+                throw Exception(ErrorCodes::LOGICAL_ERROR, "When rewriting SELECT with UNION, unimplemented UNION type: {}", ast->union_mode);
+            }
+        }
+    }
+    LOG_DEBUG(log, "[{}] Rewrite to: {}", static_cast<void*>(context.get()), context->getClientInfo().distributed_query);
 }
 
 Block InterpreterSelectWithUnionQuery::getCommonHeaderForUnion(const Blocks & headers)

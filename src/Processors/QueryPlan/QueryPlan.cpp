@@ -19,6 +19,9 @@
 #include <Processors/QueryPlan/MergingAggregatedStep.h>
 #include <Processors/QueryPlan/SortingStep.h>
 #include <Processors/QueryPlan/LimitStep.h>
+#include <Processors/Formats/IOutputFormat.h>
+#include <Processors/Sources/SourceFromSingleChunk.h>
+#include <Processors/Executors/PullingAsyncPipelineExecutor.h>
 #include <Common/JSONBuilder.h>
 #include <Common/Macros.h>
 #include <Interpreters/Cluster.h>
@@ -63,7 +66,7 @@ const DataStream & QueryPlan::getCurrentDataStream() const
     return root->step->getOutputStream();
 }
 
-void QueryPlan::unitePlans(QueryPlanStepPtr step, std::vector<std::unique_ptr<QueryPlan>> plans)
+void QueryPlan::unitePlans(QueryPlanStepPtr step, std::vector<std::unique_ptr<QueryPlan>> plans, ContextPtr context)
 {
     if (isInitialized())
         throw Exception("Cannot unite plans because current QueryPlan is already initialized",
@@ -93,7 +96,7 @@ void QueryPlan::unitePlans(QueryPlanStepPtr step, std::vector<std::unique_ptr<Qu
     for (auto & plan : plans)
         nodes.splice(nodes.end(), std::move(plan->nodes));
 
-    nodes.emplace_back(Node{.step = std::move(step)});
+    nodes.emplace_back(Node{.context = std::move(context), .step = std::move(step)});
     root = &nodes.back();
 
     for (auto & plan : plans)
@@ -110,7 +113,7 @@ void QueryPlan::unitePlans(QueryPlanStepPtr step, std::vector<std::unique_ptr<Qu
     }
 }
 
-void QueryPlan::addStep(QueryPlanStepPtr step)
+void QueryPlan::addStep(QueryPlanStepPtr step, ContextPtr context)
 {
     checkNotCompleted();
 
@@ -121,8 +124,8 @@ void QueryPlan::addStep(QueryPlanStepPtr step)
         if (isInitialized())
             throw Exception("Cannot add step " + step->getName() + " to QueryPlan because "
                             "step has no inputs, but QueryPlan is already initialized", ErrorCodes::LOGICAL_ERROR);
-
-        nodes.emplace_back(Node{.step = std::move(step)});
+        LOG_DEBUG(log, "Add step {} with context {}\n", step->getName(), static_cast<const void*>(context.get()));
+        nodes.emplace_back(Node{.context = std::move(context), .step = std::move(step)});
         root = &nodes.back();
         return;
     }
@@ -141,9 +144,9 @@ void QueryPlan::addStep(QueryPlanStepPtr step)
                             "root header: " + root_header.dumpStructure() +
                             "step header: " + step_header.dumpStructure(), ErrorCodes::LOGICAL_ERROR);
 
-        nodes.emplace_back(Node{.step = std::move(step), .children = {root}});
+        nodes.emplace_back(Node{.context = std::move(context), .step = std::move(step), .children = {root}});
         root->parent = &nodes.back();
-        root = &nodes.back();
+        root = root->parent;
         return;
     }
 
@@ -268,7 +271,6 @@ void QueryPlan::buildStages(ContextPtr context)
             checkShuffle(frame.node, last_node, result);
             if (result.is_shuffle)
             {
-
                 ++stage_id;
                 last_stage = createStage(stage_id, parent_stages, last_node, leaf_nodes);
 
@@ -285,6 +287,17 @@ void QueryPlan::buildStages(ContextPtr context)
             {
                 frame.node->num_parent_stages += last_node->num_parent_stages;
                 frame.node->num_leaf_nodes_in_stage += last_node->num_leaf_nodes_in_stage;
+                /// If relationships between current node and all of its child nodes are shuffle, current node will have no context.
+                if (!frame.node->context && last_node->context)
+                {
+                    frame.node->context = last_node->context;
+                    LOG_DEBUG(
+                        log,
+                        "Set context({} <= {}) to {}",
+                        frame.node->step->getName(),
+                        last_node->step->getName(),
+                        static_cast<const void *>(frame.node->context.get()));
+                }
             }
 
             ++frame.visited_children;
@@ -439,7 +452,7 @@ void QueryPlan::scheduleStages(ContextMutablePtr context)
                                                     "SystemContributors", "SystemLicenses",
                                                     "SystemReplicatedMergeTreeSettings", "SystemMergeTreeSettings"};
 
-    static std::unordered_set<String> special_storages{"HDFS", "S3", "MySQL"};
+    static std::unordered_set<String> special_storages{"HDFS", "S3", "MySQL", "Memory"};
 
     auto fillStage = [&store_replicas, &compute_replicas, this, &my_replica](Stage * stage)
     {
@@ -555,7 +568,25 @@ void QueryPlan::scheduleStages(ContextMutablePtr context)
         }
     }
 
-    /// Send plan fragment params.
+    /// Create query info.
+    GRPCQueryInfo query_info;
+    {
+        /// Fill with data shared among stages.
+        query_info.set_database(context->getCurrentDatabase());
+        query_info.set_output_format("Native");
+
+        assert(!context->getClientInfo().distributed_query.empty());
+        query_info.set_query(context->getClientInfo().distributed_query);
+        query_info.set_initial_query_id(initial_query_id);
+
+        /// Fill changed settings.
+        for (const auto setting : context->getSettingsRef().allChanged())
+        {
+            (*query_info.mutable_settings())[setting.getName()] = setting.getValueString();
+        }
+    }
+
+    /// Send query info.
     LOG_DEBUG(log, "===> Send stages.");
     for (auto & stage : stages)
     {
@@ -611,25 +642,133 @@ void QueryPlan::scheduleStages(ContextMutablePtr context)
         LOG_DEBUG(log, "Stage {} has {} workers.", stage.id, stage.workers.size());
         assert(!stage.workers.empty());
 
-        /// Create query info.
-        GRPCQueryInfo query_info;
-        query_info.set_database(context->getCurrentDatabase());
-        query_info.set_output_format("Native");
-        if (!context->getSelectQuery().empty())
-            query_info.set_query(context->getSelectQuery()); /// For "insert into ... select"
-        else
-            query_info.set_query(context->getClientInfo().initial_query);
+        /// Fill with data related to each stage.
         query_info.set_query_id(context->generateQueryId());
-        query_info.set_initial_query_id(initial_query_id);
         query_info.set_stage_id(stage.id);
         query_info.set_has_view_source(stage.has_view_source);
         query_info.set_has_input_function(stage.has_input_function);
 
-        for (const auto setting : context->getSettingsRef().allChanged())
+        /// TODO: Not all stages need external tables, so choose the ones that are necessary, at least for leaf stages.
+        /// Fill external tables(reference from Connection.cpp: void Connection::sendExternalTablesData(ExternalTablesData & data)):
+        if (stage.is_leaf_stage)
         {
-            (*query_info.mutable_settings())[setting.getName()] = setting.getValueString();
+            if (!stage.root_node->context)
+                LOG_DEBUG(log, "No need to prepare external tables data, because context is null.");
+            else
+            {
+                /// 1.Construct ExternalTablesData.
+                ExternalTablesData external_tables_data;
+                {
+                    const auto & external_tables = stage.root_node->context->getExternalTables();
+                    LOG_DEBUG(
+                        log,
+                        "Prepare {} external tables using context {}.",
+                        external_tables.size(),
+                        static_cast<const void *>(stage.root_node->context.get()));
+                    for (const auto & table : external_tables)
+                    {
+                        StoragePtr cur = table.second;
+
+                        auto data = std::make_unique<ExternalTableData>();
+                        data->table_name = table.first;
+
+                        LOG_DEBUG(
+                            log,
+                            "Prepare external table {} with {} ({}).",
+                            data->table_name,
+                            cur->getStorageID().getFullNameNotQuoted(),
+                            cur->getName());
+                        {
+                            SelectQueryInfo select_query_info;
+                            auto metadata_snapshot = cur->getInMemoryMetadataPtr();
+                            QueryProcessingStage::Enum read_from_table_stage = cur->getQueryProcessingStage(
+                                stage.root_node->context, QueryProcessingStage::Complete, metadata_snapshot, select_query_info);
+
+                            Pipe pipe = cur->read(
+                                metadata_snapshot->getColumns().getNamesOfPhysical(),
+                                metadata_snapshot,
+                                select_query_info,
+                                stage.root_node->context,
+                                read_from_table_stage,
+                                DEFAULT_BLOCK_SIZE,
+                                1);
+
+                            if (pipe.empty())
+                            {
+                                data->pipe = std::make_unique<Pipe>(
+                                    std::make_shared<SourceFromSingleChunk>(metadata_snapshot->getSampleBlock(), Chunk()));
+                            }
+                            else
+                            {
+                                data->pipe = std::make_unique<Pipe>(std::move(pipe));
+                            }
+                        }
+                        external_tables_data.emplace_back(std::move(data));
+                    }
+                }
+
+                /// Fill external tables:
+                /// 2.Construct grpc data.
+                for (auto & data : external_tables_data)
+                {
+                    Stopwatch watch;
+                    clickhouse::grpc::ExternalTable external_table;
+                    external_table.set_name(data->table_name);
+                    external_table.set_format("Native");
+
+                    assert(data->pipe);
+
+                    QueryPipelineBuilder pipeline_builder;
+                    pipeline_builder.init(std::move(*data->pipe));
+                    data->pipe.reset();
+                    pipeline_builder.resize(1);
+                    auto pipeline = QueryPipelineBuilder::getPipeline(std::move(pipeline_builder));
+
+                    /// Fill columns name and type.
+                    auto header = pipeline.getHeader();
+                    for (size_t i = 0; i < header.columns(); ++i)
+                    {
+                        ColumnWithTypeAndName column = header.safeGetByPosition(i);
+                        clickhouse::grpc::NameAndType name_and_type;
+                        name_and_type.set_name(column.name);
+                        name_and_type.set_type(column.type->getName());
+                        external_table.mutable_columns()->Add(std::move(name_and_type));
+                    }
+
+                    /// Fill data.
+                    std::optional<WriteBufferFromString> write_buffer;
+                    write_buffer.emplace(*external_table.mutable_data());
+                    std::shared_ptr<IOutputFormat> output_format_processor = context->getOutputFormat("Native", *write_buffer, header);
+                    output_format_processor->doWritePrefix();
+
+                    Block block;
+                    size_t rows = 0, bytes = 0;
+                    auto executor = std::make_shared<PullingAsyncPipelineExecutor>(pipeline);
+                    while (executor->pull(block, 100))
+                    {
+                        if (block)
+                        {
+                            rows += block.rows();
+                            bytes += block.bytes();
+                            output_format_processor->write(materializeBlock(block));
+                        }
+                    }
+                    output_format_processor->doWriteSuffix();
+                    LOG_DEBUG(
+                        log,
+                        "Fill external table {} with {} rows, {} bytes in {} sec.",
+                        external_table.name(),
+                        rows,
+                        bytes,
+                        watch.elapsedSeconds());
+
+                    query_info.mutable_external_tables()->Add(std::move(external_table));
+                }
+            }
         }
 
+        /// Fill parents id and sources.
+        query_info.clear_parent_sources();
         for (const auto parent : stage.parents)
         {
             clickhouse::grpc::MapEntry entry;
@@ -637,13 +776,18 @@ void QueryPlan::scheduleStages(ContextMutablePtr context)
                 entry.add_sources(*source);
             (*query_info.mutable_parent_sources())[parent->id] = entry;
         }
+
+        /// Fill sinks.
+        query_info.clear_sinks();
         for (const auto & sink : stage.sinks)
         {
             query_info.add_sinks(*sink);
         }
+
         /// Send query info to each remote worker.
         for (const auto & worker : stage.workers)
         {
+            Stopwatch watch;
             query_info.set_node_id(*worker);
             LOG_DEBUG(log, "Remote plan fragment:\n{}", debugRemotePlanFragment(query_info.query(), *worker, initial_query_id, &stage));
 
@@ -657,7 +801,7 @@ void QueryPlan::scheduleStages(ContextMutablePtr context)
 
             GRPCClient cli(*worker);
             auto result = cli.executePlanFragment(query_info);
-            LOG_DEBUG(log, "GRPCClient got result, exception code: {}, exception text: {}.", result.exception().code(), result.exception().display_text());
+            LOG_DEBUG(log, "Finish sending GRPC query info in {} sec. Exception: (code {}) {}", watch.elapsedSeconds(), result.exception().code(), result.exception().display_text());
         }
     }
 }
@@ -884,13 +1028,20 @@ bool QueryPlan::buildDistributedPlan(ContextMutablePtr context)
         return false;
     }
 
+    if (context->getSkipDistributedPlan())
+    {
+        LOG_DEBUG(log, "Skip building distributed plan, because skip_distributed_plan is true.");
+        return false;
+    }
+
     {
         /// Print the original query plan.
         WriteBufferFromOwnString buf;
         buf << "------ Original Query Plan ------\n";
+        buf << "SQL: " << context->getClientInfo().distributed_query << "\n";
         QueryPlan::ExplainPlanOptions options{.header = true, .actions = true};
         explainPlan(buf, options);
-        LOG_DEBUG(log, "Original query plan:\n{}", buf.str());
+        LOG_DEBUG(log, "[{}] Original query plan:\n{}", static_cast<void*>(context.get()), buf.str());
     }
 
     checkInitialized();

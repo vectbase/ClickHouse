@@ -120,7 +120,7 @@ void IStorage::read(
     else
     {
         auto read_step = std::make_unique<ReadFromStorageStep>(std::move(pipe), getName());
-        query_plan.addStep(std::move(read_step));
+        query_plan.addStep(std::move(read_step), context);
     }
 }
 

@@ -4,6 +4,7 @@
 #include <Interpreters/IInterpreter.h>
 #include <Interpreters/SelectQueryOptions.h>
 #include <Parsers/IAST_fwd.h>
+#include <Parsers/queryToString.h>
 #include <DataTypes/DataTypesNumber.h>
 
 namespace DB
@@ -25,6 +26,8 @@ public:
             context->addLocalScalar(
                 "_shard_count",
                 Block{{DataTypeUInt32().createColumnConst(1, *options.shard_count), std::make_shared<DataTypeUInt32>(), "_shard_count"}});
+        /// Set distributed_query for sending query info in building distributed plan.
+        context->getClientInfo().distributed_query = queryToString(query_ptr);
     }
 
     virtual void buildQueryPlan(QueryPlan & query_plan) = 0;
@@ -39,6 +42,8 @@ public:
     size_t getMaxStreams() const { return max_streams; }
 
     void extendQueryLogElemImpl(QueryLogElement & elem, const ASTPtr &, ContextPtr) const override;
+
+    const ContextMutablePtr & getContext() const { return context; }
 
 protected:
     ASTPtr query_ptr;

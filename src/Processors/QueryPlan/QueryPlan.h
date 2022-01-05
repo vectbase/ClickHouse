@@ -53,8 +53,8 @@ public:
     QueryPlan(QueryPlan &&);
     QueryPlan & operator=(QueryPlan &&);
 
-    void unitePlans(QueryPlanStepPtr step, std::vector<QueryPlanPtr> plans);
-    void addStep(QueryPlanStepPtr step);
+    void unitePlans(QueryPlanStepPtr step, std::vector<QueryPlanPtr> plans, ContextPtr context = {});
+    void addStep(QueryPlanStepPtr step, ContextPtr context = {});
 
     bool isInitialized() const { return root != nullptr; } /// Tree is not empty
     bool isCompleted() const; /// Tree is not empty and root hasOutputStream()
@@ -112,6 +112,7 @@ public:
     /// Tree node. Step and it's children.
     struct Node
     {
+        ContextPtr context;
         QueryPlanStepPtr step;
         std::vector<Node *> children = {};
         Node * parent = nullptr;

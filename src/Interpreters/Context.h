@@ -310,6 +310,7 @@ public:
     OpenTelemetryTraceContext query_trace_context;
 
 private:
+    bool skip_distributed_plan = false;
     std::optional<QueryPlanFragmentInfo> query_plan_fragment_info; /// It has no value if current node is initial compute node.
     String select_query;
 
@@ -514,6 +515,9 @@ public:
 
     const QueryFactoriesInfo & getQueryFactoriesInfo() const { return query_factories_info; }
     void addQueryFactoriesInfo(QueryLogFactories factory_type, const String & created_object) const;
+
+    bool getSkipDistributedPlan() const { return skip_distributed_plan; }
+    void setSkipDistributedPlan(bool skip) { skip_distributed_plan = skip; }
 
     bool isInitialQuery() const { return !query_plan_fragment_info; }
     const QueryPlanFragmentInfo & getQueryPlanFragmentInfo() const { return query_plan_fragment_info.value(); }

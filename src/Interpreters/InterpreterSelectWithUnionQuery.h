@@ -41,6 +41,7 @@ public:
 
 private:
     std::vector<std::unique_ptr<IInterpreterUnionOrSelectQuery>> nested_interpreters;
+    Poco::Logger * log;
 
     static Block getCommonHeaderForUnion(const Blocks & headers);
 
