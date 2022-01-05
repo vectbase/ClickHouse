@@ -436,7 +436,8 @@ void QueryPlan::scheduleStages(ContextMutablePtr context)
                                                     "SystemSettings", "SystemSettingsProfiles", "SystemSettingsProfileElements",
                                                     "SystemZooKeeper",
                                                     "SystemNumbers", "SystemOne", "SystemZeros",
-                                                    "SystemContributors", "SystemLicenses"};
+                                                    "SystemContributors", "SystemLicenses",
+                                                    "SystemReplicatedMergeTreeSettings", "SystemMergeTreeSettings"};
 
     static std::unordered_set<String> special_storages{"HDFS", "S3", "MySQL"};
 
