@@ -296,6 +296,7 @@ private:
 
 
 public:
+    DistributedDDLGuardPtr distributed_ddl_guard;
     struct QueryPlanFragmentInfo
     {
         String initial_query_id;

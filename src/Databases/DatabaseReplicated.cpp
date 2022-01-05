@@ -821,11 +821,13 @@ void DatabaseReplicated::commitCreateTable(const ASTCreateQuery & query, const S
     DatabaseAtomic::commitCreateTable(query, table, table_metadata_tmp_path, table_metadata_path, query_context);
 }
 
-void DatabaseReplicated::commitDatabase(ContextPtr query_context)
+void DatabaseReplicated::commitDatabase(ContextPtr query_context, const std::function<void(ZooKeeperMetadataTransactionPtr)> & add_ops)
 {
     auto txn = query_context->getZooKeeperMetadataTransaction();
     if (txn && txn->isInitialQuery())
     {
+        if (add_ops)
+            add_ops(txn);
         txn->commit();
     }
 }

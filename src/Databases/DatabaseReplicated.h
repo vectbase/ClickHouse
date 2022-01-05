@@ -37,7 +37,7 @@ public:
                            const String & table_metadata_tmp_path, const String & table_metadata_path,
                            ContextPtr query_context) override;
 
-    void commitDatabase(ContextPtr query_context);
+    void commitDatabase(ContextPtr query_context, const std::function<void(ZooKeeperMetadataTransactionPtr)> & add_ops = nullptr);
     void commitAlterTable(const StorageID & table_id,
                           const String & table_metadata_tmp_path, const String & table_metadata_path,
                           const String & statement, ContextPtr query_context) override;

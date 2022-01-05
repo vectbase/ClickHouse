@@ -88,6 +88,7 @@ namespace ErrorCodes
     extern const int UNKNOWN_DATABASE;
     extern const int PATH_ACCESS_DENIED;
     extern const int NOT_IMPLEMENTED;
+    extern const int CANNOT_CREATE_DATABASE;
 }
 
 namespace fs = std::filesystem;
@@ -102,7 +103,14 @@ BlockIO InterpreterCreateQuery::createDatabase(ASTCreateQuery & create)
 {
     String database_name = create.database;
 
-    auto guard = DatabaseCatalog::instance().getDDLGuard(database_name, "");
+    /// If the statement is not from ddl and not internal, that is from the user, the database requires distributed ddl guard
+    if (!getContext()->getClientInfo().is_replicated_database_internal && !internal)
+    {
+        getContext()->distributed_ddl_guard = DatabaseCatalog::instance().getDistributedDDLGuard(database_name);
+        if (!getContext()->distributed_ddl_guard->isCreated())
+            throw Exception(
+                "Database " + database_name + " is locked by another one, couldn't acquire lock", ErrorCodes::CANNOT_CREATE_DATABASE);
+    }
 
     /// Database can be created before or it can be created concurrently in another thread, while we were waiting in DDLGuard
     if (DatabaseCatalog::instance().isDatabaseExist(database_name))
@@ -241,20 +249,12 @@ BlockIO InterpreterCreateQuery::createDatabase(ASTCreateQuery & create)
     {
         auto * ptr = typeid_cast<DatabaseReplicated *>(
             DatabaseCatalog::instance().getDatabase(getContext()->getConfigRef().getString("default_database", "default")).get());
-        guard.reset();
         if (!ptr)
             throw Exception("The default database is not Replicated engine", ErrorCodes::LOGICAL_ERROR);
         return ptr->tryEnqueueReplicatedDDL(query_ptr, getContext());
     }
 
     DatabasePtr database = DatabaseFactory::get(create, metadata_path / "", getContext());
-
-    if (getContext()->getClientInfo().is_replicated_database_internal && !internal)
-    {
-        auto * ptr = typeid_cast<DatabaseReplicated *>(
-            DatabaseCatalog::instance().getDatabase(getContext()->getConfigRef().getString("default_database", "default")).get());
-        ptr->commitDatabase(getContext());
-    }
 
     if (create.uuid != UUIDHelpers::Nil)
         create.database = TABLE_WITH_UUID_NAME_PLACEHOLDER;
@@ -281,13 +281,35 @@ BlockIO InterpreterCreateQuery::createDatabase(ASTCreateQuery & create)
         out.close();
     }
 
-    /// We attach database before loading it's tables, so do not allow concurrent DDL queries
-    auto db_guard = DatabaseCatalog::instance().getExclusiveDDLGuardForDatabase(database_name);
+    auto create_database_nodes_in_zookeeper = [this, &database_name] (ZooKeeperMetadataTransactionPtr txn)
+    {
+        auto zookeeper_path = fs::path(DEFAULT_ZOOKEEPER_METADATA_PATH) / database_name;
+        getContext()->getZooKeeper()->createAncestors(zookeeper_path);
 
+        txn->addOp(zkutil::makeCreateRequest(zookeeper_path, "", zkutil::CreateMode::Persistent));
+        txn->addOp(zkutil::makeCreateRequest(zookeeper_path / "log", "", zkutil::CreateMode::Persistent));
+        txn->addOp(zkutil::makeCreateRequest(zookeeper_path / "replicas", "", zkutil::CreateMode::Persistent));
+        txn->addOp(zkutil::makeCreateRequest(zookeeper_path / "counter", "", zkutil::CreateMode::Persistent));
+        /// We create and remove counter/cnt- node to increment sequential number of counter/ node and make log entry numbers start from 1.
+        /// New replicas are created with log pointer equal to 0 and log pointer is a number of the last executed entry.
+        /// It means that we cannot have log entry with number 0.
+        txn->addOp(zkutil::makeCreateRequest(zookeeper_path / "counter/cnt-", "", zkutil::CreateMode::Persistent));
+        txn->addOp(zkutil::makeRemoveRequest(zookeeper_path / "counter/cnt-", -1));
+        txn->addOp(zkutil::makeCreateRequest(zookeeper_path / "metadata", "", zkutil::CreateMode::Persistent));
+        txn->addOp(zkutil::makeCreateRequest(zookeeper_path / "max_log_ptr", "1", zkutil::CreateMode::Persistent));
+        txn->addOp(zkutil::makeCreateRequest(zookeeper_path / "logs_to_keep", "1000", zkutil::CreateMode::Persistent));
+    };
     bool added = false;
     bool renamed = false;
     try
     {
+        if (getContext()->getClientInfo().is_replicated_database_internal && !internal)
+        {
+            auto * ptr = typeid_cast<DatabaseReplicated *>(
+                DatabaseCatalog::instance().getDatabase(getContext()->getConfigRef().getString("default_database", "default")).get());
+            ptr->commitDatabase(getContext(), create_database_nodes_in_zookeeper);
+        }
+
         /// TODO Attach db only after it was loaded. Now it's not possible because of view dependencies
         DatabaseCatalog::instance().attachDatabase(database_name, database);
         added = true;

@@ -33,6 +33,7 @@ namespace ErrorCodes
     extern const int NOT_IMPLEMENTED;
     extern const int INCORRECT_QUERY;
     extern const int TABLE_IS_READ_ONLY;
+    extern const int CANNOT_DROP_DATABASE;
 }
 
 
@@ -304,7 +305,14 @@ BlockIO InterpreterDropQuery::executeToDatabase(const ASTDropQuery & query)
 BlockIO InterpreterDropQuery::executeToDatabaseImpl(const ASTDropQuery & query, DatabasePtr & database, std::vector<UUID> & uuids_to_wait)
 {
     const auto & database_name = query.database;
-    auto ddl_guard = DatabaseCatalog::instance().getDDLGuard(database_name, "");
+
+    if (!getContext()->getClientInfo().is_replicated_database_internal)
+    {
+        getContext()->distributed_ddl_guard = DatabaseCatalog::instance().getDistributedDDLGuard(database_name);
+        if (!getContext()->distributed_ddl_guard->isCreated())
+            throw Exception(
+                "Database " + database_name + " is locked by another one, couldn't acquire lock", ErrorCodes::CANNOT_DROP_DATABASE);
+    }
 
     database = tryGetDatabase(database_name, query.if_exists);
     if (database)
@@ -325,17 +333,9 @@ BlockIO InterpreterDropQuery::executeToDatabaseImpl(const ASTDropQuery & query, 
             {
                 auto * ptr = typeid_cast<DatabaseReplicated *>(
                     DatabaseCatalog::instance().getDatabase(getContext()->getConfigRef().getString("default_database", "default")).get());
-                ddl_guard.reset();
                 if (!ptr)
                     throw Exception("The default database is not Replicated engine", ErrorCodes::LOGICAL_ERROR);
                 return ptr->tryEnqueueReplicatedDDL(query_ptr, getContext());
-            }
-
-            if (getContext()->getClientInfo().is_replicated_database_internal)
-            {
-                auto * ptr = typeid_cast<DatabaseReplicated *>(
-                    DatabaseCatalog::instance().getDatabase(getContext()->getConfigRef().getString("default_database", "default")).get());
-                ptr->commitDatabase(getContext());
             }
 
 #if USE_MYSQL
@@ -365,6 +365,9 @@ BlockIO InterpreterDropQuery::executeToDatabaseImpl(const ASTDropQuery & query, 
                     iterator->table()->flush();
                 }
 
+                /// Just drop the table locally, so no transaction is needed
+                auto txn = getContext()->getZooKeeperMetadataTransaction();
+                getContext()->resetZooKeeperMetadataTransaction();
                 for (auto iterator = database->getTablesIterator(getContext()); iterator->isValid(); iterator->next())
                 {
                     DatabasePtr db;
@@ -374,6 +377,8 @@ BlockIO InterpreterDropQuery::executeToDatabaseImpl(const ASTDropQuery & query, 
                     executeToTableImpl(query_for_table, db, table_to_wait);
                     uuids_to_wait.push_back(table_to_wait);
                 }
+                /// Recover transaction for dropping the database
+                getContext()->initZooKeeperMetadataTransaction(txn);
             }
 
             if (!drop && query.no_delay)
@@ -383,12 +388,15 @@ BlockIO InterpreterDropQuery::executeToDatabaseImpl(const ASTDropQuery & query, 
                     database->waitDetachedTableNotInUse(table_uuid);
             }
 
-            /// Protects from concurrent CREATE TABLE queries
-            auto db_guard = DatabaseCatalog::instance().getExclusiveDDLGuardForDatabase(database_name);
-
             if (!drop)
                 database->assertCanBeDetached(true);
 
+            if (getContext()->getClientInfo().is_replicated_database_internal)
+            {
+                auto * ptr = typeid_cast<DatabaseReplicated *>(
+                    DatabaseCatalog::instance().getDatabase(getContext()->getConfigRef().getString("default_database", "default")).get());
+                ptr->commitDatabase(getContext());
+            }
             /// DETACH or DROP database itself
             DatabaseCatalog::instance().detachDatabase(getContext(), database_name, drop, database->shouldBeEmptyOnDetach());
         }
