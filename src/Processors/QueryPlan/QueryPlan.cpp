@@ -625,6 +625,11 @@ void QueryPlan::scheduleStages(ContextMutablePtr context)
         query_info.set_has_view_source(stage.has_view_source);
         query_info.set_has_input_function(stage.has_input_function);
 
+        for (const auto setting : context->getSettingsRef().allChanged())
+        {
+            (*query_info.mutable_settings())[setting.getName()] = setting.getValueString();
+        }
+
         for (const auto parent : stage.parents)
         {
             clickhouse::grpc::MapEntry entry;
