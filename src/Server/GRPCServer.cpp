@@ -806,6 +806,7 @@ namespace
         std::atomic<bool> finish{false};
         std::atomic<bool> cancel{false};
         std::chrono::seconds wait_timeout_seconds{600};
+        Exception exception;
     };
 
     void QueryInfoWrapper::notifyHeader(Block header_)
@@ -1767,6 +1768,9 @@ namespace
             throwIfFailedToSendResult();
         }
 
+        if (query_info_wrapper->exception.code())
+            throw Exception(query_info_wrapper->exception);
+
         if (!query_info_wrapper->cancel)
         {
             addTotalsToResult(query_info_wrapper->totals);
@@ -1841,6 +1845,18 @@ namespace
 
     void Call::onException(const Exception & exception)
     {
+        if (call_type == CALL_EXECUTE_PLAN_FRAGMENT)
+        {
+            if (query_info_wrapper)
+            {
+                LOG_DEBUG(log, "{} producer has an exception", query_info_key);
+                query_info_wrapper->exception = exception;
+                cancelPlanFragment();
+                query_info_wrapper->notifyFinish();
+            }
+            query_info_key.clear();
+        }
+
         io.onException();
 
         LOG_ERROR(log, getExceptionMessage(exception, true));
@@ -1911,7 +1927,7 @@ namespace
         query_scope.reset();
         query_context.reset();
         session.reset();
-        if (call_type == CALL_EXECUTE_PLAN_FRAGMENT && !query_info_key.empty())
+        if (!query_info_key.empty())
             query_info_map->erase(query_info_key);
     }
 
