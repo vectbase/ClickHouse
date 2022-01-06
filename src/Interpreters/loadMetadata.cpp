@@ -164,15 +164,57 @@ void loadMetadata(ContextMutablePtr context, const String & default_database_nam
     if (create_default_db_if_not_exists && !metadata_dir_for_default_db_already_exists)
         databases.emplace(default_database_name, std::filesystem::path(path) / escapeForFileName(default_database_name));
 
-    /// Load databases from metaService
+    /// Sync databases with meta-service.
     {
         auto zookeeper = context->getZooKeeper();
         zookeeper->createAncestors(std::filesystem::path(DEFAULT_ZOOKEEPER_METADATA_PATH) / "");
-        auto db_names = zookeeper->getChildren(DEFAULT_ZOOKEEPER_METADATA_PATH);
-        for (auto & db_name : db_names)
+        auto get_consistent_metadata_snapshot = [&zookeeper] {
+            std::map<String, String> database_name_to_metadata;
+            auto zookeeper_path = std::filesystem::path(DEFAULT_ZOOKEEPER_METADATA_PATH);
+            Strings database_names = zookeeper->getChildren(zookeeper_path);
+            for (const auto & database_name : database_names)
+            {
+                String query = zookeeper->get(zookeeper_path / database_name);
+                database_name_to_metadata.emplace(unescapeForFileName(database_name), query);
+            }
+            return database_name_to_metadata;
+        };
+        auto database_name_to_metadata = get_consistent_metadata_snapshot();
+        /// Remove local metadata for databases that do not exist in meta-service.
+        Strings databases_to_detach;
+        for (const auto & [database_name, _] : databases)
+            if (!isSystemOrInformationSchema(database_name) && database_name != default_database_name
+                && database_name_to_metadata.find(database_name) == database_name_to_metadata.end())
+                databases_to_detach.emplace_back(database_name);
+
+        for (const auto & database_to_detach : databases_to_detach)
         {
-            if (!databases.contains(db_name))
-                databases.emplace(db_name, std::filesystem::path(path) / escapeForFileName(db_name));
+            databases.erase(database_to_detach);
+            String escaped_name = escapeForFileName(database_to_detach);
+            /// Delete meta data
+            fs::path database_metadata_dir = fs::path(path) / escaped_name;
+            if (fs::is_symlink(database_metadata_dir))
+                fs::remove_all(fs::read_symlink(database_metadata_dir));
+            fs::remove_all(database_metadata_dir);
+            fs::path database_metadata_file = fs::path(path) / (escaped_name + ".sql");
+            fs::remove(database_metadata_file);
+            /// Delete data
+            fs::path database_data_dir = fs::path(context->getPath()) / "data" / escaped_name;
+            fs::directory_iterator database_dir_end;
+            for (fs::directory_iterator it(database_data_dir); it != database_dir_end; ++it)
+            {
+                auto table_dir = it->path();
+                if (fs::is_symlink(table_dir))
+                    table_dir = fs::read_symlink(table_dir);
+                fs::remove_all(table_dir);
+            }
+            fs::remove_all(database_data_dir);
+        }
+
+        for (const auto & [database_name, _] : database_name_to_metadata)
+        {
+            if (!databases.contains(database_name))
+                databases.emplace(database_name, std::filesystem::path(path) / escapeForFileName(database_name));
         }
     }
 

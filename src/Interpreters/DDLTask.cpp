@@ -10,6 +10,7 @@
 #include <Parsers/ParserQuery.h>
 #include <Parsers/parseQuery.h>
 #include <Parsers/ASTQueryWithOnCluster.h>
+#include <Parsers/ASTDropQuery.h>
 #include <Parsers/formatAST.h>
 #include <Parsers/ASTQueryWithTableAndOutput.h>
 #include <Databases/DatabaseReplicated.h>
@@ -352,6 +353,13 @@ void DatabaseReplicatedTask::parseQueryFromEntry(ContextPtr context)
     {
         if (!ddl_query->table.empty())
             ddl_query->database = database->getDatabaseName();
+        else
+        {
+            if (auto * create_query = dynamic_cast<ASTCreateQuery *>(query.get()))
+                create_query->if_not_exists = true;
+            else if (auto * drop_query = dynamic_cast<ASTDropQuery *>(query.get()))
+                drop_query->if_exists = true;
+        }
     }
 }
 
