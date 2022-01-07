@@ -2,6 +2,7 @@
 
 #include <base/defines.h>
 
+#define DATABASE_LOCK_SUFFIX "_0X5F3759DF_DB_LOCK"
 #define DEFAULT_ZOOKEEPER_METADATA_PATH "/clickhouse/metadata"
 #define CLUSTER_TYPE_COMPUTE "compute"
 #define CLUSTER_TYPE_STORE "store"

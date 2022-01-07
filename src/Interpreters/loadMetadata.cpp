@@ -174,6 +174,8 @@ void loadMetadata(ContextMutablePtr context, const String & default_database_nam
             Strings database_names = zookeeper->getChildren(zookeeper_path);
             for (const auto & database_name : database_names)
             {
+                if (database_name.ends_with(DATABASE_LOCK_SUFFIX))
+                    continue;
                 String query = zookeeper->get(zookeeper_path / database_name);
                 database_name_to_metadata.emplace(unescapeForFileName(database_name), query);
             }

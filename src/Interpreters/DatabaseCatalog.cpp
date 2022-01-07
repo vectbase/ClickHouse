@@ -991,7 +991,7 @@ DistributedDDLGuard::DistributedDDLGuard(zkutil::ZooKeeperPtr zookeeper_, const 
     {
         auto path = fs::path(DEFAULT_ZOOKEEPER_METADATA_PATH);
         if (table_name_.empty())
-            path = path / (database_name_ + "_lock");
+            path = path / (database_name_ + DATABASE_LOCK_SUFFIX);
         else
             path = path / database_name_ / "metadata" / (table_name_ + "_lock");
         hold_path = zookeeper->create(path, "", zkutil::CreateMode::Ephemeral);
