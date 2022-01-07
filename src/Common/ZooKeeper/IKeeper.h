@@ -345,6 +345,36 @@ struct MultiResponse : virtual Response
     }
 };
 
+struct AddWatchRequest : virtual Request
+{
+    String path;
+    int32_t mode = 0;
+
+    void addRootPath(const String & root_path) override;
+    String getPath() const override { return path; }
+    size_t bytesSize() const override { return path.size() + sizeof(mode); }
+};
+
+struct AddWatchResponse : virtual Response
+{
+    int32_t errCode = 0;
+    size_t bytesSize() const override { return sizeof(errCode); }
+};
+
+struct RemoveWatchesRequest : virtual Request
+{
+    String path;
+    int32_t type = 0;
+
+    void addRootPath(const String & root_path) override;
+    String getPath() const override { return path; }
+    size_t bytesSize() const override { return path.size() + sizeof(type); }
+};
+
+struct RemoveWatchesResponse : virtual Response
+{
+};
+
 /// This response may be received only as an element of responses in MultiResponse.
 struct ErrorResponse : virtual Response
 {

@@ -425,6 +425,50 @@ struct ZooKeeperGetACLResponse final : GetACLResponse, ZooKeeperResponse
     size_t bytesSize() const override { return GetACLResponse::bytesSize() + sizeof(xid) + sizeof(zxid); }
 };
 
+struct ZooKeeperAddWatchRequest final : AddWatchRequest, ZooKeeperRequest
+{
+    ZooKeeperAddWatchRequest() = default;
+    explicit ZooKeeperAddWatchRequest(const AddWatchRequest & base) : AddWatchRequest(base) {}
+    OpNum getOpNum() const override { return OpNum::AddWatch; }
+    void writeImpl(WriteBuffer & out) const override;
+    void readImpl(ReadBuffer & in) override;
+    ZooKeeperResponsePtr makeResponse() const override;
+    bool isReadRequest() const override { return true; }
+
+    size_t bytesSize() const override { return AddWatchRequest::bytesSize() + sizeof(xid); }
+};
+
+struct ZooKeeperAddWatchResponse final : AddWatchResponse, ZooKeeperResponse
+{
+    void readImpl(ReadBuffer &) override;
+    void writeImpl(WriteBuffer &) const override;
+    OpNum getOpNum() const override { return OpNum::AddWatch; }
+
+    size_t bytesSize() const override { return AddWatchResponse::bytesSize() + sizeof(xid) + sizeof(zxid); }
+};
+
+struct ZooKeeperRemoveWatchesRequest final : RemoveWatchesRequest, ZooKeeperRequest
+{
+    ZooKeeperRemoveWatchesRequest() = default;
+    explicit ZooKeeperRemoveWatchesRequest(const RemoveWatchesRequest & base) : RemoveWatchesRequest(base) {}
+    OpNum getOpNum() const override { return OpNum::RemoveWatches; }
+    void writeImpl(WriteBuffer & out) const override;
+    void readImpl(ReadBuffer & in) override;
+    ZooKeeperResponsePtr makeResponse() const override;
+    bool isReadRequest() const override { return true; }
+
+    size_t bytesSize() const override { return RemoveWatchesRequest::bytesSize() + sizeof(xid); }
+};
+
+struct ZooKeeperRemoveWatchesResponse final : RemoveWatchesResponse, ZooKeeperResponse
+{
+    void readImpl(ReadBuffer &) override {}
+    void writeImpl(WriteBuffer &) const override {}
+    OpNum getOpNum() const override { return OpNum::RemoveWatches; }
+
+    size_t bytesSize() const override { return RemoveWatchesResponse::bytesSize() + sizeof(xid) + sizeof(zxid); }
+};
+
 struct ZooKeeperMultiRequest final : MultiRequest, ZooKeeperRequest
 {
     OpNum getOpNum() const override { return OpNum::Multi; }

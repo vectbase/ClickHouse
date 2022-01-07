@@ -7,6 +7,7 @@
 #include <Coordination/SessionExpiryQueue.h>
 #include <Coordination/ACLMap.h>
 #include <Coordination/SnapshotableHashTable.h>
+#include <Coordination/KeeperPersistentWatcherMgr.h>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -71,7 +72,7 @@ public:
     using Container = SnapshotableHashTable<Node>;
     using Ephemerals = std::unordered_map<int64_t, std::unordered_set<std::string>>;
     using SessionAndWatcher = std::unordered_map<int64_t, std::unordered_set<std::string>>;
-    using SessionIDs = std::vector<int64_t>;
+    using SessionIDs = std::unordered_set<int64_t>;
 
     /// Just vector of SHA1 from user:password
     using AuthIDs = std::vector<AuthID>;
@@ -104,6 +105,7 @@ public:
     /// Currently active watches (node_path -> subscribed sessions)
     Watches watches;
     Watches list_watches;   /// Watches for 'list' request (watches on children).
+    KeeperPersistentWatcherMgr pWatcherMgr;
 
     void clearDeadWatches(int64_t session_id);
 
@@ -176,6 +178,9 @@ public:
     {
         return session_expiry_queue.getExpiredSessions();
     }
+
+    /// Delete watcher in cWatches by it's sessionID and path
+    bool deleteWatcher(Watches & cWatches, int64_t sessionID, String path);
 };
 
 using KeeperStoragePtr = std::unique_ptr<KeeperStorage>;

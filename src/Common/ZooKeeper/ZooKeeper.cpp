@@ -1133,4 +1133,22 @@ Coordination::RequestPtr makeCheckRequest(const std::string & path, int version)
     return request;
 }
 
+// makeAddWatchRequest add persistent watch or persistent & recursive watch on a znode, mode can be: 0: persistent, 1: persistent-recursive
+Coordination::RequestPtr makeAddWatchRequest(const std::string & path, int mode)
+{
+    auto request = std::make_shared<Coordination::AddWatchRequest>();
+    request->path = path;
+    request->mode = mode;
+    return request;
+}
+
+// makeRemoveWatchesRequest remove watch on a znode, type can be 1: children watch, 2: data watch, 3: any watches
+Coordination::RequestPtr makeRemoveWatchesRequest(const std::string & path, int type)
+{
+    auto request = std::make_shared<Coordination::RemoveWatchesRequest>();
+    request->path = path;
+    request->type = type;
+    return request;
+}
+
 }
