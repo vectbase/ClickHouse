@@ -760,7 +760,7 @@ namespace
             CANCEL
         };
 
-        QueryInfoWrapper(GRPCQueryInfo * query_info_, int consumers_)
+        QueryInfoWrapper(const std::shared_ptr<GRPCQueryInfo> & query_info_, int consumers_)
             : query_info(query_info_), consumers(consumers_), blocks(consumers), ready(consumers, false), ready_count(0)
         {
         }
@@ -780,7 +780,7 @@ namespace
         QueryInfoWrapper::Status waitReadyOrFinish(int index);
         void notifyProduce();
 
-        GRPCQueryInfo * query_info;
+        std::shared_ptr<GRPCQueryInfo> query_info;
         int consumers;
 
         /// Transferred data between producer and consumer.
@@ -961,7 +961,7 @@ namespace
         Progress progress;
         InternalTextLogsQueuePtr logs_queue;
 
-        GRPCQueryInfo query_info; /// We reuse the same messages multiple times.
+        std::shared_ptr<GRPCQueryInfo> query_info; /// We reuse the same messages multiple times.
         GRPCResult result;
         GRPCTicket ticket;
 
@@ -993,7 +993,7 @@ namespace
         BoolState reading_ticket{false};
         std::atomic<bool> failed_to_read_query_info = false;
         std::atomic<bool> failed_to_read_ticket = false;
-        GRPCQueryInfo next_query_info_while_reading;
+        std::shared_ptr<GRPCQueryInfo> next_query_info_while_reading;
         GRPCTicket next_ticket_while_reading;
         std::atomic<bool> want_to_cancel = false;
         std::atomic<bool> check_query_info_contains_cancel_only = false;
@@ -1100,10 +1100,10 @@ namespace
 
         readQueryInfo();
 
-        if (query_info.cancel())
+        if (query_info->cancel())
             throw Exception("Initial query info cannot set the 'cancel' field", ErrorCodes::INVALID_GRPC_QUERY_INFO);
 
-        LOG_DEBUG(log, "Received initial QueryInfo: {}", getQueryDescription(query_info));
+        LOG_DEBUG(log, "Received initial QueryInfo: {}", getQueryDescription(*query_info));
     }
 
     void Call::receiveTicket()
@@ -1120,12 +1120,12 @@ namespace
         /// If this is from fetchPlanFragmentResult(), restore query_info from wrapper,
         /// and initialize query_context, but don't build pipeline.
         if (call_type == CALL_FETCH_PLAN_FRAGMENT_RESULT)
-            query_info = *query_info_wrapper->query_info;
+            query_info = query_info_wrapper->query_info;
 
         /// Retrieve user credentials.
-        std::string user = query_info.user_name();
-        std::string password = query_info.password();
-        std::string quota_key = query_info.quota();
+        std::string user = query_info->user_name();
+        std::string password = query_info->password();
+        std::string quota_key = query_info->quota();
         Poco::Net::SocketAddress user_address = responder->getClientAddress();
 
         if (user.empty())
@@ -1141,10 +1141,10 @@ namespace
 
         /// The user could specify session identifier and session timeout.
         /// It allows to modify settings, create temporary tables and reuse them in subsequent requests.
-        if (!query_info.session_id().empty())
+        if (!query_info->session_id().empty())
         {
             session->makeSessionContext(
-                query_info.session_id(), getSessionTimeout(query_info, iserver.config()), query_info.session_check());
+                query_info->session_id(), getSessionTimeout(*query_info, iserver.config()), query_info->session_check());
         }
 
         query_context = session->makeQueryContext();
@@ -1153,7 +1153,7 @@ namespace
         if (call_type == CALL_EXECUTE_PLAN_FRAGMENT)
         {
             std::unordered_map<int, std::vector<std::shared_ptr<String>>> parent_sources;
-            for (const auto & parent : query_info.parent_sources())
+            for (const auto & parent : query_info->parent_sources())
             {
                 std::vector<std::shared_ptr<String>> sources;
                 for (const auto & source : parent.second.sources())
@@ -1161,14 +1161,14 @@ namespace
                 parent_sources[parent.first] = std::move(sources);
             }
             std::vector<std::shared_ptr<String>> sinks;
-            for (const auto & sink : query_info.sinks())
+            for (const auto & sink : query_info->sinks())
             {
                 sinks.emplace_back(std::make_shared<String>(sink));
             }
             Context::QueryPlanFragmentInfo fragment_info{
-                .initial_query_id = query_info.initial_query_id(),
-                .stage_id = query_info.stage_id(),
-                .node_id = query_info.node_id(),
+                .initial_query_id = query_info->initial_query_id(),
+                .stage_id = query_info->stage_id(),
+                .node_id = query_info->node_id(),
                 .parent_sources = std::move(parent_sources),
                 .sinks = sinks };
             query_context->setQueryPlanFragmentInfo(std::move(fragment_info));
@@ -1176,16 +1176,16 @@ namespace
 
         /// Prepare settings.
         SettingsChanges settings_changes;
-        for (const auto & [key, value] : query_info.settings())
+        for (const auto & [key, value] : query_info->settings())
         {
             settings_changes.push_back({key, value});
         }
         query_context->checkSettingsConstraints(settings_changes);
         query_context->applySettingsChanges(settings_changes);
 
-        query_context->getClientInfo().query_kind = ClientInfo::QueryKind(query_info.query_kind());
-        query_context->getClientInfo().initial_query_id = query_info.initial_query_id();
-        query_context->setCurrentQueryId(query_info.query_id());
+        query_context->getClientInfo().query_kind = ClientInfo::QueryKind(query_info->query_kind());
+        query_context->getClientInfo().initial_query_id = query_info->initial_query_id();
+        query_context->setCurrentQueryId(query_info->query_id());
         query_scope.emplace(query_context);
 
         /// Prepare for sending exceptions and logs.
@@ -1201,12 +1201,12 @@ namespace
         }
 
         /// Set the current database if specified.
-        if (!query_info.database().empty())
-            query_context->setCurrentDatabase(query_info.database());
+        if (!query_info->database().empty())
+            query_context->setCurrentDatabase(query_info->database());
 
         /// Apply compression settings for this call.
-        if (query_info.has_result_compression())
-            responder->setResultCompression(query_info.result_compression());
+        if (query_info->has_result_compression())
+            responder->setResultCompression(query_info->result_compression());
 
         /// The interactive delay will be used to show progress.
         interactive_delay = settings.interactive_delay;
@@ -1220,7 +1220,7 @@ namespace
         }
 
         /// Parse the query.
-        query_text = std::move(*(query_info.mutable_query()));
+        query_text = std::move(*(query_info->mutable_query()));
         const char * begin = query_text.data();
         const char * end = begin + query_text.size();
         ParserQuery parser(end);
@@ -1235,10 +1235,10 @@ namespace
                 input_format = "Values";
         }
 
-        input_data_delimiter = query_info.input_data_delimiter();
+        input_data_delimiter = query_info->input_data_delimiter();
 
         /// Choose output format.
-        query_context->setDefaultFormat(query_info.output_format());
+        query_context->setDefaultFormat(query_info->output_format());
         if (const auto * ast_query_with_output = dynamic_cast<const ASTQueryWithOutput *>(ast.get());
             ast_query_with_output && ast_query_with_output->format)
         {
@@ -1258,17 +1258,17 @@ namespace
         if (call_type == CALL_EXECUTE_PLAN_FRAGMENT)
         {
             const String & plan_fragment_id
-                = query_info.initial_query_id() + "/" + toString(query_info.stage_id()) + "/" + query_info.node_id();
+                = query_info->initial_query_id() + "/" + toString(query_info->stage_id()) + "/" + query_info->node_id();
 
-            if (query_info.has_view_source() || query_info.has_input_function())
+            if (query_info->has_view_source() || query_info->has_input_function())
             {
                 const auto & initial_query_context = query_context->getInitialQueryContext(plan_fragment_id);
-                if (query_info.has_view_source())
+                if (query_info->has_view_source())
                 {
                     LOG_DEBUG(log, "Restore view source for plan fragment {}", plan_fragment_id);
                     query_context->addViewSource(initial_query_context->getViewSource());
                 }
-                else if (query_info.has_input_function())
+                else if (query_info->has_input_function())
                 {
                     query_context->setQueryContext(std::const_pointer_cast<Context>(initial_query_context));
                 }
@@ -1308,8 +1308,8 @@ namespace
 
     void Call::storeQueryInfoWrapper()
     {
-        query_info_key = query_info.initial_query_id() + "/" + toString(query_info.stage_id());
-        auto res = query_info_map->insert(query_info_key, std::make_shared<QueryInfoWrapper>(&query_info, query_info.sinks_size()));
+        query_info_key = query_info->initial_query_id() + "/" + toString(query_info->stage_id());
+        auto res = query_info_map->insert(query_info_key, std::make_shared<QueryInfoWrapper>(query_info, query_info->sinks_size()));
         if (!res.second)
         {
             throw Exception("Query info key " + query_info_key + " already exists", ErrorCodes::LOGICAL_ERROR);
@@ -1339,7 +1339,7 @@ namespace
             return;
 
         bool has_data_to_insert = (insert_query && insert_query->data)
-                                  || !query_info.input_data().empty() || query_info.next_query_info();
+                                  || !query_info->input_data().empty() || query_info->next_query_info();
         if (!has_data_to_insert)
         {
             if (!insert_query)
@@ -1384,30 +1384,30 @@ namespace
             {
                 if (need_input_data_from_query_info)
                 {
-                    if (need_input_data_delimiter && !query_info.input_data().empty())
+                    if (need_input_data_delimiter && !query_info->input_data().empty())
                     {
                         need_input_data_delimiter = false;
                         return {input_data_delimiter.data(), input_data_delimiter.size()};
                     }
                     need_input_data_from_query_info = false;
-                    if (!query_info.input_data().empty())
+                    if (!query_info->input_data().empty())
                     {
                         need_input_data_delimiter = !input_data_delimiter.empty();
-                        return {query_info.input_data().data(), query_info.input_data().size()};
+                        return {query_info->input_data().data(), query_info->input_data().size()};
                     }
                 }
 
-                if (!query_info.next_query_info())
+                if (!query_info->next_query_info())
                     break;
 
                 if (!isInputStreaming(call_type))
                     throw Exception("next_query_info is allowed to be set only for streaming input", ErrorCodes::INVALID_GRPC_QUERY_INFO);
 
                 readQueryInfo();
-                if (!query_info.query().empty() || !query_info.query_id().empty() || !query_info.settings().empty()
-                    || !query_info.database().empty() || !query_info.input_data_delimiter().empty() || !query_info.output_format().empty()
-                    || query_info.external_tables_size() || !query_info.user_name().empty() || !query_info.password().empty()
-                    || !query_info.quota().empty() || !query_info.session_id().empty())
+                if (!query_info->query().empty() || !query_info->query_id().empty() || !query_info->settings().empty()
+                    || !query_info->database().empty() || !query_info->input_data_delimiter().empty() || !query_info->output_format().empty()
+                    || query_info->external_tables_size() || !query_info->user_name().empty() || !query_info->password().empty()
+                    || !query_info->quota().empty() || !query_info->session_id().empty())
                 {
                     throw Exception("Extra query infos can be used only to add more input data. "
                                     "Only the following fields can be set: input_data, next_query_info, cancel",
@@ -1417,7 +1417,7 @@ namespace
                 if (isQueryCancelled())
                     break;
 
-                LOG_DEBUG(log, "Received extra QueryInfo: input_data: {} bytes", query_info.input_data().size());
+                LOG_DEBUG(log, "Received extra QueryInfo: input_data: {} bytes", query_info->input_data().size());
                 need_input_data_from_query_info = true;
             }
 
@@ -1459,7 +1459,7 @@ namespace
     {
         while (true)
         {
-            for (const auto & external_table : query_info.external_tables())
+            for (const auto & external_table : query_info->external_tables())
             {
                 String name = external_table.name();
                 if (name.empty())
@@ -1529,24 +1529,24 @@ namespace
                 }
             }
 
-            if (!query_info.input_data().empty())
+            if (!query_info->input_data().empty())
             {
                 /// External tables must be created before executing query,
                 /// so all external tables must be send no later sending any input data.
                 break;
             }
 
-            if (!query_info.next_query_info())
+            if (!query_info->next_query_info())
                 break;
 
             if (!isInputStreaming(call_type))
                 throw Exception("next_query_info is allowed to be set only for streaming input", ErrorCodes::INVALID_GRPC_QUERY_INFO);
 
             readQueryInfo();
-            if (!query_info.query().empty() || !query_info.query_id().empty() || !query_info.settings().empty()
-                || !query_info.database().empty() || !query_info.input_data_delimiter().empty()
-                || !query_info.output_format().empty() || !query_info.user_name().empty() || !query_info.password().empty()
-                || !query_info.quota().empty() || !query_info.session_id().empty())
+            if (!query_info->query().empty() || !query_info->query_id().empty() || !query_info->settings().empty()
+                || !query_info->database().empty() || !query_info->input_data_delimiter().empty()
+                || !query_info->output_format().empty() || !query_info->user_name().empty() || !query_info->password().empty()
+                || !query_info->quota().empty() || !query_info->session_id().empty())
             {
                 throw Exception("Extra query infos can be used only to add more data to input or more external tables. "
                                 "Only the following fields can be set: input_data, external_tables, next_query_info, cancel",
@@ -1554,7 +1554,7 @@ namespace
             }
             if (isQueryCancelled())
                 break;
-            LOG_DEBUG(log, "Received extra QueryInfo: external tables: {}", query_info.external_tables_size());
+            LOG_DEBUG(log, "Received extra QueryInfo: external tables: {}", query_info->external_tables_size());
         }
     }
 
@@ -1936,12 +1936,13 @@ namespace
         auto start_reading = [&]
         {
             reading_query_info.set(true);
-            responder->read(next_query_info_while_reading, [this](bool ok)
+            next_query_info_while_reading = std::make_shared<GRPCQueryInfo>();
+            responder->read(*next_query_info_while_reading, [this](bool ok)
             {
                 /// Called on queue_thread.
                 if (ok)
                 {
-                    const auto & nqi = next_query_info_while_reading;
+                    const auto & nqi = *next_query_info_while_reading;
                     if (check_query_info_contains_cancel_only)
                     {
                         if (!nqi.query().empty() || !nqi.query_id().empty() || !nqi.settings().empty() || !nqi.database().empty()
@@ -1973,7 +1974,7 @@ namespace
                 waited_for_client_writing += client_writing_watch.elapsedNanoseconds();
             }
             throwIfFailedToReadQueryInfo();
-            query_info = std::move(next_query_info_while_reading);
+            query_info = next_query_info_while_reading;
             initial_query_info_read = true;
         };
 
