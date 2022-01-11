@@ -82,7 +82,7 @@ Block GRPCClient::read()
                 addr,
                 result.exception().code(),
                 result.exception().display_text());
-            throw Exception(result.exception().display_text(), ErrorCodes::GRPC_READ_ERROR, true);
+            throw Exception(result.exception().display_text(), result.exception().code(), true);
         }
 
         if (result.output().size() == 0)
