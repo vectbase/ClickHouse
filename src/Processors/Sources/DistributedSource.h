@@ -16,7 +16,7 @@ public:
     ~DistributedSource() override;
 
     Status prepare() override;
-    String getName() const override { return "Distributed"; }
+    String getName() const override { return "DistributedSource"; }
 
     void onUpdatePorts() override;
 

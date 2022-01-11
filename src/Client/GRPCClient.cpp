@@ -96,7 +96,7 @@ Block GRPCClient::read()
     }
 
     throw Exception(
-        "Read from grpc server " + addr + "failed, " + toString(result.exception().code()) + ", " + result.exception().display_text(),
+        "Read from grpc server " + addr + " failed, " + toString(result.exception().code()) + ", " + result.exception().display_text(),
         ErrorCodes::GRPC_READ_ERROR,
         true);
 }
