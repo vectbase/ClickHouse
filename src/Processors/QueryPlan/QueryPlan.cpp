@@ -402,7 +402,7 @@ void QueryPlan::debugStages()
     LOG_DEBUG(log, "===> Print Stages:\n{}", buf.str());
 }
 
-void QueryPlan::scheduleStages(ContextMutablePtr context)
+bool QueryPlan::scheduleStages(ContextMutablePtr context)
 {
     LOG_DEBUG(log, "===> Schedule stages.");
     /// Use initial query id to build the plan fragment id.
@@ -454,7 +454,8 @@ void QueryPlan::scheduleStages(ContextMutablePtr context)
 
     static std::unordered_set<String> special_storages{"HDFS", "S3", "MySQL", "Memory"};
 
-    auto fillStage = [&store_replicas, &compute_replicas, this, &my_replica](Stage * stage)
+    bool is_result_stage_moved_forward = false;
+    auto fillStage = [&store_replicas, &compute_replicas, this, &my_replica, &is_result_stage_moved_forward](Stage * stage)
     {
         /// Leaf stage.
         if (stage->is_leaf_stage)
@@ -517,11 +518,15 @@ void QueryPlan::scheduleStages(ContextMutablePtr context)
             {
                 auto * parent = stage->parents.front();
                 if (parent->workers.size() == 1 && !parent->parents.empty())
-                    parent->workers.front() = stage->workers.front();
-
-                /// Another solution: merge result stage into its parent stage.
-                //LOG_DEBUG(log, "Result stage {} moves forward to parent stage {}.", result_stage->id, result_stage->parents[0]->id);
-                //result_stage = result_stage->parents[0];
+                {
+                    /// Use result stage's parent as result stage.
+                    LOG_DEBUG(log, "Move result stage {} forward to parent stage {}.", result_stage->id, parent->id);
+                    assert(result_stage == &stages.back());
+                    result_stage = parent;
+                    root = parent->root_node;
+                    stages.pop_back();
+                    is_result_stage_moved_forward = true;
+                }
             }
             return;
         }
@@ -594,40 +599,56 @@ void QueryPlan::scheduleStages(ContextMutablePtr context)
         if (&stage == result_stage)
         {
             assert(!result_stage->parents.empty());
-            /// Clear query plan tree.
-            root = nullptr;
-
-            for (const auto parent_stage : result_stage->parents)
+            if (is_result_stage_moved_forward)
             {
-                const Node * parent_stage_node = parent_stage->root_node;
-                const auto & header = parent_stage_node->step->getOutputStream().header;
-                assert(header);
-                LOG_DEBUG(
-                    log,
-                    "Take the output stream header of {}: {}, header columns: {}.",
-                    parent_stage_node->step->getName(),
-                    parent_stage_node->step->getStepDescription(),
-                    header.columns());
-
-                auto distributed_source_step = std::make_unique<DistributedSourceStep>(
-                    header,
-                    parent_stage->workers,
-                    initial_query_id,
-                    result_stage->id,
-                    parent_stage->id,
-                    *result_stage->workers.front(),
-                    false,
-                    context);
-                /// TODO: Improve to support adding multiple distributed_source_step, such as Union operator.
-                addStep(std::move(distributed_source_step));
+                Context::QueryPlanFragmentInfo query_plan_fragment_info{
+                    .initial_query_id = initial_query_id,
+                    .stage_id = stage.id,
+                    .node_id = my_replica
+                };
+                for (const auto parent : stage.parents)
+                {
+                    query_plan_fragment_info.parent_sources[parent->id] = parent->workers;
+                }
+                query_plan_fragment_info.sinks = stage.sinks;
+                context->setQueryPlanFragmentInfo(query_plan_fragment_info);
             }
+            else
             {
-                /// Only for debug.
-                LOG_DEBUG(
-                    log,
-                    "Result plan fragment:\n{}",
-                    debugLocalPlanFragment(
-                        initial_query_id, result_stage->id, *result_stage->workers.front(), std::vector<Node *>{root}));
+                /// Clear query plan tree.
+                root = nullptr;
+
+                for (const auto parent_stage : result_stage->parents)
+                {
+                    const Node * parent_stage_node = parent_stage->root_node;
+                    const auto & header = parent_stage_node->step->getOutputStream().header;
+                    assert(header);
+                    LOG_DEBUG(
+                        log,
+                        "Take the output stream header of {}: {}, header columns: {}.",
+                        parent_stage_node->step->getName(),
+                        parent_stage_node->step->getStepDescription(),
+                        header.columns());
+
+                    auto distributed_source_step = std::make_unique<DistributedSourceStep>(
+                        header,
+                        parent_stage->workers,
+                        initial_query_id,
+                        result_stage->id,
+                        parent_stage->id,
+                        *result_stage->workers.front(),
+                        false,
+                        context);
+                    addStep(std::move(distributed_source_step));
+                }
+                {
+                    /// Only for debug.
+                    LOG_DEBUG(
+                        log,
+                        "Result plan fragment:\n{}",
+                        debugLocalPlanFragment(
+                            initial_query_id, result_stage->id, *result_stage->workers.front(), std::vector<Node *>{root}));
+                }
             }
             continue;
         }
@@ -804,6 +825,8 @@ void QueryPlan::scheduleStages(ContextMutablePtr context)
             LOG_DEBUG(log, "Finish sending GRPC query info in {} sec. Exception: (code {}) {}", watch.elapsedSeconds(), result.exception().code(), result.exception().display_text());
         }
     }
+
+    return is_result_stage_moved_forward;
 }
 
 void QueryPlan::buildPlanFragment(ContextPtr context)
@@ -812,7 +835,8 @@ void QueryPlan::buildPlanFragment(ContextPtr context)
     int my_stage_id = query_distributed_plan_info.stage_id;
     LOG_DEBUG(
         log,
-        "===> Build plan fragment: stage {}, has {} parent stages.",
+        "===> Build plan fragment: {} stage {}, has {} parent stages.",
+        (result_stage ? (my_stage_id == result_stage->id ? "result": "no-result") : "no-result"),
         my_stage_id,
         query_distributed_plan_info.parent_sources.size());
 
@@ -1049,7 +1073,8 @@ bool QueryPlan::buildDistributedPlan(ContextMutablePtr context)
     if (context->isInitialQuery())
     {
         buildStages(context);
-        scheduleStages(context);
+        if (scheduleStages(context))
+            buildPlanFragment(context);
     }
     else
     {

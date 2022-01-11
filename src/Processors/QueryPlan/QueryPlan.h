@@ -66,7 +66,8 @@ public:
 
     void buildStages(ContextPtr context);       /// Used by initial node.
     void debugStages();
-    void scheduleStages(ContextMutablePtr context);    /// Used by initial node.
+    /// Return true if result stage is moved forward.
+    bool scheduleStages(ContextMutablePtr context);    /// Used by initial node.
     void buildPlanFragment(ContextPtr context); /// Used by non-initial nodes.
     bool buildDistributedPlan(ContextMutablePtr context);
 
