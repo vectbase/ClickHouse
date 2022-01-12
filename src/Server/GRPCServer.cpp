@@ -1262,15 +1262,22 @@ namespace
 
             if (query_info->has_view_source() || query_info->has_input_function())
             {
-                const auto & initial_query_context = query_context->getInitialQueryContext(plan_fragment_id);
+                const auto & initial_context = query_context->getInitialContext(plan_fragment_id);
                 if (query_info->has_view_source())
                 {
-                    LOG_DEBUG(log, "Restore view source for plan fragment {}", plan_fragment_id);
-                    query_context->addViewSource(initial_query_context->getViewSource());
+                    const auto & view_source = initial_context->getViewSource();
+                    assert(view_source);
+                    LOG_DEBUG(
+                        log,
+                        "Restore view source {}({}) for plan fragment {}",
+                        view_source->getStorageID().getFullNameNotQuoted(),
+                        view_source->getName(),
+                        plan_fragment_id);
+                    query_context->addViewSource(view_source);
                 }
                 else if (query_info->has_input_function())
                 {
-                    query_context->setQueryContext(std::const_pointer_cast<Context>(initial_query_context));
+                    query_context->setQueryContext(std::const_pointer_cast<Context>(initial_context));
                 }
             }
         }

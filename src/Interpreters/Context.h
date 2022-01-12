@@ -531,8 +531,8 @@ public:
     void addViewSource(const StoragePtr & storage);
     StoragePtr getViewSource() const;
 
-    void addInitialQueryContext(const String & plan_fragment_id, const ContextPtr context);
-    ContextPtr getInitialQueryContext(const String & plan_fragment_id) const;
+    void addInitialContext(const String & plan_fragment_id, const ContextPtr & context);
+    ContextPtr getInitialContext(const String & plan_fragment_id) const;
     bool isStandaloneMode() const;
 
     String getCurrentDatabase() const;

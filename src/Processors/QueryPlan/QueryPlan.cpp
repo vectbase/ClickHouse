@@ -511,13 +511,13 @@ bool QueryPlan::scheduleStages(ContextMutablePtr context)
         if (stage == result_stage)
         {
             stage->workers.emplace_back(std::make_shared<String>(my_replica));
-            /// Optimize:
-            /// the result stage has only one parent worker and its parent stage is not leaf stage,
-            /// place its parent stage on the same worker as result stage.
+
+            /// Maybe the last stage can be eliminated.
             if (stage->parents.size() == 1)
             {
                 auto * parent = stage->parents.front();
-                if (parent->workers.size() == 1 && !parent->parents.empty())
+                /// Parent stage will be scheduled on the same worker as result stage.
+                if (parent->workers.size() == 1 && *(parent->workers.front()) == my_replica)
                 {
                     /// Use result stage's parent as result stage.
                     LOG_DEBUG(log, "Move result stage {} forward to parent stage {}.", result_stage->id, parent->id);
@@ -816,8 +816,29 @@ bool QueryPlan::scheduleStages(ContextMutablePtr context)
             {
                 const String & plan_fragment_id
                     = query_info.initial_query_id() + "/" + toString(query_info.stage_id()) + "/" + query_info.node_id();
-                context->addInitialQueryContext(plan_fragment_id, context->getQueryContext());
-                LOG_DEBUG(log, "Store initial query context for plan fragment {}, because has {}.", plan_fragment_id, (stage.has_view_source ? "view source" : "input function"));
+                if (stage.has_view_source)
+                {
+                    const auto & view_source = context->getViewSource();
+                    assert(view_source);
+                    LOG_DEBUG(
+                        log,
+                        "Store initial context {} for plan fragment {}, because has view source: {}({}).",
+                        static_cast<void *>(context.get()),
+                        plan_fragment_id,
+                        view_source->getStorageID().getFullNameNotQuoted(),
+                        view_source->getName());
+                    context->addInitialContext(plan_fragment_id, context);
+                }
+                else
+                {
+                    LOG_DEBUG(
+                        log,
+                        "Store initial context {} for plan fragment {}, because has input function.",
+                        static_cast<void *>(context->getQueryContext().get()),
+                        plan_fragment_id);
+                    context->addInitialContext(plan_fragment_id, context->getQueryContext());
+                }
+
             }
 
             GRPCClient cli(*worker);
