@@ -89,6 +89,8 @@
     M(ZooKeeperCheck, "") \
     M(ZooKeeperClose, "") \
     M(ZooKeeperWatchResponse, "") \
+    M(ZooKeeperAddWatch, "") \
+    M(ZooKeeperRemomveWatches, "") \
     M(ZooKeeperUserExceptions, "") \
     M(ZooKeeperHardwareExceptions, "") \
     M(ZooKeeperOtherExceptions, "") \

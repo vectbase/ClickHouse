@@ -696,6 +696,67 @@ void ZooKeeper::tryRemoveRecursive(const std::string & path)
     tryRemove(path);
 }
 
+void ZooKeeper::addWatch(const std::string & path, int mode, Coordination::WatchCallback watch_callback)
+{
+    check(tryAddWatch(path, Coordination::WatchMode(mode), watch_callback), path);
+}
+
+Coordination::Error ZooKeeper::tryAddWatch(const std::string & path, Coordination::WatchMode mode, Coordination::WatchCallback watch_callback)
+{
+    Coordination::Error code = addWatchImpl(path, mode, watch_callback);
+
+    if (!(code == Coordination::Error::ZOK || code == Coordination::Error::ZNONODE))
+        throw KeeperException(code, path);
+
+    return code;
+}
+
+Coordination::Error ZooKeeper::addWatchImpl(const std::string & path, Coordination::WatchMode mode, Coordination::WatchCallback watch_callback)
+{
+    auto future_result = asyncTryAddRecursiveWatch(path, mode, watch_callback);
+
+    if (future_result.wait_for(std::chrono::milliseconds(operation_timeout_ms)) != std::future_status::ready)
+    {
+        impl->finalize(fmt::format("Operation timeout on {} {}", toString(Coordination::OpNum::Create), path));
+        return Coordination::Error::ZOPERATIONTIMEOUT;
+    }
+    else
+    {
+        auto response = future_result.get();
+        return response.error;
+    }
+}
+
+void ZooKeeper::removeWatches(const std::string & path, int type)
+{
+    check(tryRemoveWatches(path, type), path);
+}
+
+Coordination::Error ZooKeeper::tryRemoveWatches(const std::string & path, int type)
+{
+    Coordination::Error code = removeWatchesImpl(path, Coordination::WatchType(type));
+
+    if (!(code == Coordination::Error::ZOK || code == Coordination::Error::ZNONODE))
+        throw KeeperException(code, path);
+
+    return code;
+}
+
+Coordination::Error ZooKeeper::removeWatchesImpl(const std::string & path, Coordination::WatchType type)
+{
+    auto future_result = asyncTryRemoveWatches(path, type);
+
+    if (future_result.wait_for(std::chrono::milliseconds(operation_timeout_ms)) != std::future_status::ready)
+    {
+        impl->finalize(fmt::format("Operation timeout on {} {}", toString(Coordination::OpNum::Create), path));
+        return Coordination::Error::ZOPERATIONTIMEOUT;
+    }
+    else
+    {
+        auto response = future_result.get();
+        return response.error;
+    }
+}
 
 namespace
 {
@@ -800,6 +861,34 @@ std::future<Coordination::CreateResponse> ZooKeeper::asyncTryCreateNoThrow(const
     };
 
     impl->create(path, data, mode & 1, mode & 2, {}, std::move(callback));
+    return future;
+}
+
+std::future<Coordination::AddWatchResponse> ZooKeeper::asyncTryAddRecursiveWatch(const std::string & path, Coordination::WatchMode mode, Coordination::WatchCallback watch_callback)
+{
+    auto promise = std::make_shared<std::promise<Coordination::AddWatchResponse>>();
+    auto future = promise->get_future();
+
+    auto callback = [promise](const Coordination::AddWatchResponse & response) mutable
+    {
+        promise->set_value(response);
+    };
+
+    impl->addWatch(path, mode, std::move(callback), watch_callback);
+    return future;
+}
+
+std::future<Coordination::RemoveWatchesResponse> ZooKeeper::asyncTryRemoveWatches(const std::string & path, Coordination::WatchType type)
+{
+    auto promise = std::make_shared<std::promise<Coordination::RemoveWatchesResponse>>();
+    auto future = promise->get_future();
+
+    auto callback = [promise](const Coordination::RemoveWatchesResponse & response) mutable
+    {
+        promise->set_value(response);
+    };
+
+    impl->removeWatches(path, type, std::move(callback));
     return future;
 }
 

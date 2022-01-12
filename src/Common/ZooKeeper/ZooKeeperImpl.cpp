@@ -35,6 +35,8 @@ namespace ProfileEvents
     extern const Event ZooKeeperBytesSent;
     extern const Event ZooKeeperBytesReceived;
     extern const Event ZooKeeperWatchResponse;
+    extern const Event ZooKeeperAddWatch;
+    extern const Event ZooKeeperRemomveWatches;
 }
 
 namespace CurrentMetrics
@@ -704,29 +706,62 @@ void ZooKeeper::receiveEvent()
         {
             const WatchResponse & watch_response = dynamic_cast<const WatchResponse &>(response_);
 
-            std::lock_guard lock(watches_mutex);
-
-            auto it = watches.find(watch_response.path);
-            if (it == watches.end())
             {
-                /// This is Ok.
-                /// Because watches are identified by path.
-                /// And there may exist many watches for single path.
-                /// And watch is added to the list of watches on client side
-                ///  slightly before than it is registered by the server.
-                /// And that's why new watch may be already fired by old event,
-                ///  but then the server will actually register new watch
-                ///  and will send event again later.
-            }
-            else
-            {
-                for (auto & callback : it->second)
-                    if (callback)
-                        callback(watch_response);   /// NOTE We may process callbacks not under mutex.
+                std::lock_guard lock(watches_mutex);
 
-                CurrentMetrics::sub(CurrentMetrics::ZooKeeperWatch, it->second.size());
-                watches.erase(it);
+                auto it = watches.find(watch_response.path);
+                if (it == watches.end())
+                {
+                    /// This is Ok.
+                    /// Because watches are identified by path.
+                    /// And there may exist many watches for single path.
+                    /// And watch is added to the list of watches on client side
+                    ///  slightly before than it is registered by the server.
+                    /// And that's why new watch may be already fired by old event,
+                    ///  but then the server will actually register new watch
+                    ///  and will send event again later.
+                }
+                else
+                {
+                    for (auto & callback : it->second)
+                        if (callback)
+                            callback(watch_response); /// NOTE We may process callbacks not under mutex.
+
+                    CurrentMetrics::sub(CurrentMetrics::ZooKeeperWatch, it->second.size());
+                    watches.erase(it);
+                }
             }
+            /// Maybe it's a persistent watch
+            {
+                std::lock_guard lock(persistent_watches_mutex);
+                auto it = persistent_watches.find(watch_response.path);
+                if (it != persistent_watches.end())
+                {
+                    for (auto & callback : it->second)
+                        if (callback)
+                            callback(watch_response);
+                }
+            }
+            {
+                std::lock_guard lock(persistent_recursive_watches_mutex);
+                for (auto path = watch_response.path; !path.empty(); )
+                {
+                    auto it = persistent_recursive_watches.find(path);
+                    if (it != persistent_recursive_watches.end())
+                    {
+                        for (auto & callback : it->second)
+                            if (callback)
+                                callback(watch_response);
+                    }
+
+                    if (path.rfind("/") != std::string::npos)
+                    {
+                        path = path.substr(0, path.rfind('/'));
+                        trimRight(path, '/');
+                    }
+                }
+            }
+
         };
     }
     else
@@ -788,9 +823,28 @@ void ZooKeeper::receiveEvent()
 
                 /// The key of wathces should exclude the root_path
                 String req_path = request_info.request->getPath();
-                removeRootPath(req_path, root_path);
-                std::lock_guard lock(watches_mutex);
-                watches[req_path].emplace_back(std::move(request_info.watch));
+                if (request_info.request->getOpNum() == OpNum::AddWatch)
+                {
+                    ZooKeeperAddWatchRequest & request = dynamic_cast<ZooKeeperAddWatchRequest &>(*request_info.request);
+                    if (request.mode == int32_t(WatchMode::Persistent))
+                    {
+                        std::lock_guard lock(persistent_watches_mutex);
+                        persistent_watches[req_path].emplace_back(std::move(request_info.watch));
+                    }
+                    else if (request.mode == int32_t(WatchMode::PersistentRecursive))
+                    {  ///
+                        std::lock_guard lock(persistent_recursive_watches_mutex);
+                        persistent_recursive_watches[req_path].emplace_back(std::move(request_info.watch));
+                    }
+                    else
+                        throw Exception("Invalid watch mode in addWatch request: " + DB::toString(request.mode), Error::ZBADARGUMENTS);
+                }
+                else
+                {
+                    removeRootPath(req_path, root_path);
+                    std::lock_guard lock(watches_mutex);
+                    watches[req_path].emplace_back(std::move(request_info.watch));
+                }
             }
         }
 
@@ -1200,6 +1254,41 @@ void ZooKeeper::multi(
     ProfileEvents::increment(ProfileEvents::ZooKeeperMulti);
 }
 
+void ZooKeeper::addWatch(
+    const String &path,
+    WatchMode mode,
+    AddWatchCallback callback,
+    WatchCallback watch)
+{
+    ZooKeeperAddWatchRequest request;
+    request.path = path;
+    request.mode = int32_t(mode);
+
+    RequestInfo request_info;
+    request_info.request = std::make_shared<ZooKeeperAddWatchRequest>(std::move(request));
+    request_info.callback = [callback](const Response & response) { callback(dynamic_cast<const AddWatchResponse &>(response)); };
+    request_info.watch = watch;
+
+    pushRequest(std::move(request_info));
+    ProfileEvents::increment(ProfileEvents::ZooKeeperAddWatch);
+}
+
+void ZooKeeper::removeWatches(
+    const String &path,
+    WatchType type,
+    RemoveWatchesCallback callback)
+{
+    ZooKeeperRemoveWatchesRequest request;
+    request.path = path;
+    request.type = int32_t(type);
+
+    RequestInfo request_info;
+    request_info.request = std::make_shared<ZooKeeperRemoveWatchesRequest>(std::move(request));
+    request_info.callback = [callback](const Response & response) { callback(dynamic_cast<const RemoveWatchesResponse &>(response)); };
+
+    pushRequest(std::move(request_info));
+    ProfileEvents::increment(ProfileEvents::ZooKeeperRemomveWatches);
+}
 
 void ZooKeeper::close()
 {

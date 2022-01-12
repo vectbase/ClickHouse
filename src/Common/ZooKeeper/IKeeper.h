@@ -389,6 +389,8 @@ using SetCallback = std::function<void(const SetResponse &)>;
 using ListCallback = std::function<void(const ListResponse &)>;
 using CheckCallback = std::function<void(const CheckResponse &)>;
 using MultiCallback = std::function<void(const MultiResponse &)>;
+using AddWatchCallback = std::function<void(const AddWatchResponse &)>;
+using RemoveWatchesCallback = std::function<void(const RemoveWatchesResponse &)>;
 
 
 /// For watches.
@@ -412,6 +414,18 @@ enum Event
     NOTWATCHING = -2
 };
 
+enum WatchMode
+{
+    Persistent = 0,
+    PersistentRecursive = 1,
+};
+
+enum WatchType
+{
+    Children = 1,
+    Data = 2,
+    Any = 3,
+};
 
 class Exception : public DB::Exception
 {
@@ -509,6 +523,20 @@ public:
     virtual void multi(
         const Requests & requests,
         MultiCallback callback) = 0;
+
+    /// Add a watch to the given znode using the given mode. Note: not all watch types can be set with this method.
+    /// Only the modes available in WatchMode can be set with this method.
+    virtual void addWatch(
+        const String &path,
+        WatchMode mode,
+        AddWatchCallback callback,
+        WatchCallback watch) = 0;
+
+    /// For the given znode path, removes the specified watcher of given watchType.
+    virtual void removeWatches(
+        const String &path,
+        WatchType type,
+        RemoveWatchesCallback callback) = 0;
 
     /// Expire session and finish all pending requests
     virtual void finalize(const String & reason) = 0;

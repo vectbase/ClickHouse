@@ -204,6 +204,12 @@ public:
     /// Remove all children nodes (non recursive).
     void removeChildren(const std::string & path);
 
+    void addWatch(const std::string & path, int mode, Coordination::WatchCallback watch_callback);
+    Coordination::Error tryAddWatch(const std::string & path, Coordination::WatchMode mode, Coordination::WatchCallback watch_callback);
+
+    void removeWatches(const std::string & path, int type);
+    Coordination::Error tryRemoveWatches(const std::string & path, int type);
+
     using WaitCondition = std::function<bool()>;
 
     /// Wait for the node to disappear or return immediately if it doesn't exist.
@@ -274,6 +280,12 @@ public:
     /// * The node doesn't exist
     FutureGet asyncTryGet(const std::string & path);
 
+    using FutureAddWatch = std::future<Coordination::AddWatchResponse>;
+    FutureAddWatch asyncTryAddRecursiveWatch(const std::string & path, Coordination::WatchMode mode, Coordination::WatchCallback watch_callback);
+
+    using FutureRemoveWatches = std::future<Coordination::RemoveWatchesResponse>;
+    FutureRemoveWatches asyncTryRemoveWatches(const std::string & path, Coordination::WatchType type);
+
     void finalize(const String & reason);
 
     void setZooKeeperLog(std::shared_ptr<DB::ZooKeeperLog> zk_log_);
@@ -296,6 +308,9 @@ private:
         const std::string & path, Strings & res, Coordination::Stat * stat, Coordination::WatchCallback watch_callback);
     Coordination::Error multiImpl(const Coordination::Requests & requests, Coordination::Responses & responses);
     Coordination::Error existsImpl(const std::string & path, Coordination::Stat * stat_, Coordination::WatchCallback watch_callback);
+
+    Coordination::Error addWatchImpl(const std::string & path, Coordination::WatchMode mode, Coordination::WatchCallback watch_callback);
+    Coordination::Error removeWatchesImpl(const std::string & path, Coordination::WatchType mode);
 
     std::unique_ptr<Coordination::IKeeper> impl;
 
