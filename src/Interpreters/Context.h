@@ -200,6 +200,7 @@ private:
     std::shared_ptr<const EnabledRowPolicies> initial_row_policy;
     String current_database;
     Settings settings;  /// Setting for query execution.
+    String session_id;
 
     using ProgressCallback = std::function<void(const Progress & progress)>;
     ProgressCallback progress_callback;  /// Callback for tracking progress of query execution.
@@ -535,11 +536,14 @@ public:
     ContextPtr getInitialContext(const String & plan_fragment_id) const;
     bool isStandaloneMode() const;
 
+    String getSessionID() const;
     String getCurrentDatabase() const;
     String getCurrentQueryId() const { return client_info.current_query_id; }
 
     /// Id of initiating query for distributed queries; or current query id if it's not a distributed query.
     String getInitialQueryId() const;
+
+    void setSessionID(const String & session_id);
 
     void setCurrentDatabase(const String & name);
     /// Set current_database for global context. We don't validate that database

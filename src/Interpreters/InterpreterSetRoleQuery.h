@@ -2,7 +2,7 @@
 
 #include <Interpreters/IInterpreter.h>
 #include <Parsers/IAST_fwd.h>
-
+#include <Access/RolesOrUsersSet.h>
 
 namespace DB
 {
@@ -23,6 +23,8 @@ public:
 private:
     void setRole(const ASTSetRoleQuery & query);
     void setDefaultRole(const ASTSetRoleQuery & query);
+
+    void uploadCurrentRoles(const std::vector<UUID> & roles);
 
     ASTPtr query_ptr;
 };

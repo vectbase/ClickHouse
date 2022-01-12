@@ -1186,6 +1186,12 @@ std::shared_ptr<const SettingsConstraintsAndProfileIDs> Context::getSettingsCons
 }
 
 
+String Context::getSessionID() const
+{
+    auto lock = getLock();
+    return session_id;
+}
+
 String Context::getCurrentDatabase() const
 {
     auto lock = getLock();
@@ -1211,6 +1217,12 @@ void Context::setCurrentDatabaseNameInGlobalContext(const String & name)
                         ErrorCodes::LOGICAL_ERROR);
 
     current_database = name;
+}
+
+void Context::setSessionID(const String & id)
+{
+    auto lock = getLock();
+    session_id = id;
 }
 
 void Context::setCurrentDatabase(const String & name)

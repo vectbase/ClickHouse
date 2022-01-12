@@ -9,6 +9,7 @@
 /// Placeholder, meaningless name
 #define CLUSTER_TYPE_ALL "all"
 #define DEFAULT_ZOOKEEPER_CLUSTERS_PATH "/clickhouse/clusters"
+#define DEFAULT_ZOOKEEPER_SESSIONS_PATH "/clickhouse/sessions"
 #define STORE_NAMESPACE "shared-store"
 
 #define DBMS_DEFAULT_PORT 9000

@@ -27,6 +27,8 @@ public:
 
 private:
     ASTPtr query_ptr;
+
+    void uploadSettingChanges(const SettingsChanges & changes);
 };
 
 }

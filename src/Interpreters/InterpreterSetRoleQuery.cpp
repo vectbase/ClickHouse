@@ -6,9 +6,12 @@
 #include <Access/AccessControlManager.h>
 #include <Access/User.h>
 
+#include <boost/algorithm/string/join.hpp>
+#include <filesystem>
 
 namespace DB
 {
+namespace fs = std::filesystem;
 namespace ErrorCodes
 {
     extern const int SET_NON_GRANTED_ROLE;
@@ -25,6 +28,15 @@ BlockIO InterpreterSetRoleQuery::execute()
     return {};
 }
 
+void InterpreterSetRoleQuery::uploadCurrentRoles(const std::vector<UUID> & roles) {
+    auto zookeeper = getContext()->getZooKeeper();
+    auto zookeeper_path = fs::path(DEFAULT_ZOOKEEPER_SESSIONS_PATH) / getContext()->getSessionID();
+    Strings res;
+    res.reserve(roles.size());
+    for (const auto & id : roles)
+        res.emplace_back(toString(id));
+    zookeeper->createOrUpdate(zookeeper_path / "current_roles", boost::algorithm::join(res, ","), zkutil::CreateMode::Persistent);
+}
 
 void InterpreterSetRoleQuery::setRole(const ASTSetRoleQuery & query)
 {
@@ -54,6 +66,8 @@ void InterpreterSetRoleQuery::setRole(const ASTSetRoleQuery & query)
             }
         }
         session_context->setCurrentRoles(new_current_roles);
+        if (!session_context->getSessionID().empty())
+            uploadCurrentRoles(new_current_roles);
     }
 }
 
