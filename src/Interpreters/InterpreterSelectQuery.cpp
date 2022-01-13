@@ -1527,7 +1527,8 @@ void InterpreterSelectQuery::addEmptySourceToQueryPlan(
 
     auto read_from_pipe = std::make_unique<ReadFromPreparedSource>(std::move(pipe));
     read_from_pipe->setStepDescription("Read from NullSource");
-    query_plan.addStep(std::move(read_from_pipe), context_);
+    InterpreterParamsPtr interpreter_params = std::make_shared<InterpreterParams>(context_, query_info.query->as<ASTSelectQuery &>());
+    query_plan.addStep(std::move(read_from_pipe), std::move(interpreter_params));
 
     if (query_info.projection)
     {

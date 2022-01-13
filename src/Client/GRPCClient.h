@@ -26,6 +26,14 @@ using ReadDataCallback = std::function<void(const Block & block)>;
 class GRPCClient
 {
 public:
+    enum MessageType
+    {
+        Data = 1,
+        Totals = 2,
+        Extremes = 3,
+        MAX = Extremes,
+    };
+public:
     GRPCClient(const String & addr_);
     ~GRPCClient() = default;
 
@@ -37,7 +45,7 @@ public:
 
     /// Try to read a block from remote.
     /// If got EOF, an empty block will be returned, you can use if (!block) to check it.
-    Block read();
+    MessageType read(Block & bock);
 
     /// Cancel plan fragment (ticket associated with the prepareRead)
     void cancel();

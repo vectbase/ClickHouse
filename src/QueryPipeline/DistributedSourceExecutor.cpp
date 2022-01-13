@@ -35,12 +35,28 @@ Block DistributedSourceExecutor::read()
 
     try
     {
-        auto block = client.read();
-        LOG_DEBUG(log, "Read block, rows: {}, columns: {}.", block.rows(), block.columns());
-        if (!block)
-            finished = true;
+        Block block;
+        auto message_type = client.read(block);
+        switch (message_type)
+        {
+            case GRPCClient::MessageType::Data:
+                if (!block)
+                    finished = true;
+                LOG_DEBUG(log, "Read block, rows: {}, columns: {}.", block.rows(), block.columns());
+                return block;
 
-        return block;
+            case GRPCClient::MessageType::Totals:
+                totals = block;
+                break;
+
+            case GRPCClient::MessageType::Extremes:
+                extremes = block;
+                break;
+
+//            default:
+//                throw Exception(ErrorCodes::LOGICAL_ERROR, "Unknown GRPC block type");
+        }
+        return {};
     }
     catch (...)
     {

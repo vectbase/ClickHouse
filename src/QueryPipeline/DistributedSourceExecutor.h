@@ -24,8 +24,14 @@ public:
 
     const Block & getHeader() const { return header; }
 
+    /// Get totals and extremes if any.
+    Block getTotals() { return std::move(totals); }
+    Block getExtremes() { return std::move(extremes); }
+
 private:
     Block header;
+    Block totals;
+    Block extremes;
     const std::shared_ptr<String> source;
     String query_id;
     String node_id;

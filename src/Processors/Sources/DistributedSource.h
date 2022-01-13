@@ -33,7 +33,40 @@ private:
     bool is_async_state = false;
 };
 
+/// Totals source from RemoteQueryExecutor.
+class DistributedTotalsSource : public ISource
+{
+public:
+    explicit DistributedTotalsSource(DistributedSourceExecutorPtr executor_);
+    ~DistributedTotalsSource() override;
+
+    String getName() const override { return "DistributedTotals"; }
+
+protected:
+    Chunk generate() override;
+
+private:
+    DistributedSourceExecutorPtr executor;
+};
+
+/// Extremes source from RemoteQueryExecutor.
+class DistributedExtremesSource : public ISource
+{
+public:
+    explicit DistributedExtremesSource(DistributedSourceExecutorPtr executor_);
+    ~DistributedExtremesSource() override;
+
+    String getName() const override { return "DistributedExtremes"; }
+
+protected:
+    Chunk generate() override;
+
+private:
+    DistributedSourceExecutorPtr executor;
+};
+
 /// Create pipe with distributed sources.
-Pipe createDistributedSourcePipe(DistributedSourceExecutorPtr query_executor, bool add_aggregation_info, bool async_read);
+/// Never use add_totals and add_extremes.
+Pipe createDistributedSourcePipe(DistributedSourceExecutorPtr query_executor, bool add_aggregation_info, bool add_totals, bool add_extremes, bool async_read);
 
 }

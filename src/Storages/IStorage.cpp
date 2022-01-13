@@ -120,7 +120,9 @@ void IStorage::read(
     else
     {
         auto read_step = std::make_unique<ReadFromStorageStep>(std::move(pipe), getName());
-        query_plan.addStep(std::move(read_step), context);
+        const auto & ast = query_info.query->as<ASTSelectQuery &>();
+        InterpreterParamsPtr interpreter_params = std::make_shared<InterpreterParams>(context, ast);
+        query_plan.addStep(std::move(read_step), std::move(interpreter_params));
     }
 }
 

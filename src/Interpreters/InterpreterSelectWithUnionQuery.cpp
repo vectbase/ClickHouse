@@ -356,6 +356,17 @@ BlockIO InterpreterSelectWithUnionQuery::execute()
     QueryPlan query_plan;
     buildQueryPlan(query_plan);
 
+    {
+        /// Print the original query plan for debugging distributed table.
+        /// TODO: This will be removed in the future.
+        WriteBufferFromOwnString buf;
+        buf << "------ DEBUG Query Plan ------\n";
+        buf << "SQL: " << context->getClientInfo().distributed_query << "\n";
+        QueryPlan::ExplainPlanOptions options{.header = true, .actions = true};
+        query_plan.explainPlan(buf, options);
+        LOG_DEBUG(log, "[{}] DEBUG query plan:\n{}", static_cast<void*>(context.get()), buf.str());
+    }
+
     bool is_built = query_plan.buildDistributedPlan(context);
 
     QueryPlanOptimizationSettings optimization_settings{.optimize_plan = !is_built};

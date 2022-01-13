@@ -66,7 +66,7 @@ const DataStream & QueryPlan::getCurrentDataStream() const
     return root->step->getOutputStream();
 }
 
-void QueryPlan::unitePlans(QueryPlanStepPtr step, std::vector<std::unique_ptr<QueryPlan>> plans, ContextPtr context)
+void QueryPlan::unitePlans(QueryPlanStepPtr step, std::vector<std::unique_ptr<QueryPlan>> plans, InterpreterParamsPtr interpreter_params)
 {
     if (isInitialized())
         throw Exception("Cannot unite plans because current QueryPlan is already initialized",
@@ -96,7 +96,7 @@ void QueryPlan::unitePlans(QueryPlanStepPtr step, std::vector<std::unique_ptr<Qu
     for (auto & plan : plans)
         nodes.splice(nodes.end(), std::move(plan->nodes));
 
-    nodes.emplace_back(Node{.context = std::move(context), .step = std::move(step)});
+    nodes.emplace_back(Node{.step = std::move(step), .interpreter_params = std::move(interpreter_params)});
     root = &nodes.back();
 
     for (auto & plan : plans)
@@ -113,7 +113,7 @@ void QueryPlan::unitePlans(QueryPlanStepPtr step, std::vector<std::unique_ptr<Qu
     }
 }
 
-void QueryPlan::addStep(QueryPlanStepPtr step, ContextPtr context)
+void QueryPlan::addStep(QueryPlanStepPtr step, InterpreterParamsPtr interpreter_params)
 {
     checkNotCompleted();
 
@@ -124,8 +124,8 @@ void QueryPlan::addStep(QueryPlanStepPtr step, ContextPtr context)
         if (isInitialized())
             throw Exception("Cannot add step " + step->getName() + " to QueryPlan because "
                             "step has no inputs, but QueryPlan is already initialized", ErrorCodes::LOGICAL_ERROR);
-        LOG_DEBUG(log, "Add step {} with context {}\n", step->getName(), static_cast<const void*>(context.get()));
-        nodes.emplace_back(Node{.context = std::move(context), .step = std::move(step)});
+        LOG_DEBUG(log, "Add step {} with context {}\n", step->getName(), interpreter_params ? static_cast<const void*>(interpreter_params->context.get()): nullptr);
+        nodes.emplace_back(Node{.step = std::move(step), .interpreter_params = std::move(interpreter_params)});
         root = &nodes.back();
         return;
     }
@@ -144,7 +144,7 @@ void QueryPlan::addStep(QueryPlanStepPtr step, ContextPtr context)
                             "root header: " + root_header.dumpStructure() +
                             "step header: " + step_header.dumpStructure(), ErrorCodes::LOGICAL_ERROR);
 
-        nodes.emplace_back(Node{.context = std::move(context), .step = std::move(step), .children = {root}});
+        nodes.emplace_back(Node{.step = std::move(step), .children = {root}, .interpreter_params = std::move(interpreter_params)});
         root->parent = &nodes.back();
         root = root->parent;
         return;
@@ -287,17 +287,18 @@ void QueryPlan::buildStages(ContextPtr context)
             {
                 frame.node->num_parent_stages += last_node->num_parent_stages;
                 frame.node->num_leaf_nodes_in_stage += last_node->num_leaf_nodes_in_stage;
-                /// If relationships between current node and all of its child nodes are shuffle, current node will have no context.
-                if (!frame.node->context && last_node->context)
-                {
-                    frame.node->context = last_node->context;
-                    LOG_DEBUG(
-                        log,
-                        "Set context({} <= {}) to {}",
-                        frame.node->step->getName(),
-                        last_node->step->getName(),
-                        static_cast<const void *>(frame.node->context.get()));
-                }
+            }
+
+            /// Transfer interpreter params bottom-up.
+            if (!frame.node->interpreter_params && last_node->interpreter_params)
+            {
+                frame.node->interpreter_params = last_node->interpreter_params;
+                LOG_DEBUG(
+                    log,
+                    "Set context({} <= {}) to {}",
+                    frame.node->step->getName(),
+                    last_node->step->getName(),
+                    static_cast<const void *>(frame.node->interpreter_params->context.get()));
             }
 
             ++frame.visited_children;
@@ -638,6 +639,7 @@ bool QueryPlan::scheduleStages(ContextMutablePtr context)
                         parent_stage->id,
                         *result_stage->workers.front(),
                         false,
+                        false,
                         context);
                     addStep(std::move(distributed_source_step));
                 }
@@ -673,19 +675,20 @@ bool QueryPlan::scheduleStages(ContextMutablePtr context)
         /// Fill external tables(reference from Connection.cpp: void Connection::sendExternalTablesData(ExternalTablesData & data)):
         if (stage.is_leaf_stage)
         {
-            if (!stage.root_node->context)
-                LOG_DEBUG(log, "No need to prepare external tables data, because context is null.");
+            if (!stage.root_node->interpreter_params)
+                LOG_DEBUG(log, "No need to prepare external tables data, because interpreter_params is null.");
             else
             {
+                assert(stage.root_node->interpreter_params->context);
                 /// 1.Construct ExternalTablesData.
                 ExternalTablesData external_tables_data;
                 {
-                    const auto & external_tables = stage.root_node->context->getExternalTables();
+                    const auto & external_tables = stage.root_node->interpreter_params->context->getExternalTables();
                     LOG_DEBUG(
                         log,
                         "Prepare {} external tables using context {}.",
                         external_tables.size(),
-                        static_cast<const void *>(stage.root_node->context.get()));
+                        static_cast<const void *>(stage.root_node->interpreter_params->context.get()));
                     for (const auto & table : external_tables)
                     {
                         StoragePtr cur = table.second;
@@ -703,13 +706,13 @@ bool QueryPlan::scheduleStages(ContextMutablePtr context)
                             SelectQueryInfo select_query_info;
                             auto metadata_snapshot = cur->getInMemoryMetadataPtr();
                             QueryProcessingStage::Enum read_from_table_stage = cur->getQueryProcessingStage(
-                                stage.root_node->context, QueryProcessingStage::Complete, metadata_snapshot, select_query_info);
+                                stage.root_node->interpreter_params->context, QueryProcessingStage::Complete, metadata_snapshot, select_query_info);
 
                             Pipe pipe = cur->read(
                                 metadata_snapshot->getColumns().getNamesOfPhysical(),
                                 metadata_snapshot,
                                 select_query_info,
-                                stage.root_node->context,
+                                stage.root_node->interpreter_params->context,
                                 read_from_table_stage,
                                 DEFAULT_BLOCK_SIZE,
                                 1);
@@ -931,7 +934,8 @@ void QueryPlan::buildPlanFragment(ContextPtr context)
                     assert(header);
                     const auto & sources = it->second;
                     auto distributed_source_step = std::make_unique<DistributedSourceStep>(
-                        header, sources, query_distributed_plan_info.initial_query_id, my_stage_id, stage_id, my_replica, add_agg_info, context);
+                        header, sources, query_distributed_plan_info.initial_query_id, my_stage_id, stage_id, my_replica,
+                        add_agg_info, false, context);
                     Node * new_node = nullptr;
                     addStep(std::move(distributed_source_step), "", new_node);
                     distributed_source_nodes.emplace_back(new_node); /// For debug
@@ -942,7 +946,11 @@ void QueryPlan::buildPlanFragment(ContextPtr context)
                     if (result.child_aggregating_step)
                     {
                         const auto & settings = context->getSettingsRef();
-                        auto transform_params = std::make_shared<AggregatingTransformParams>(aggregating_step->getParams(), true);
+                        bool aggregate_final = !frame.node->interpreter_params->group_by_with_totals
+                            && !frame.node->interpreter_params->group_by_with_rollup
+                            && !frame.node->interpreter_params->group_by_with_cube;
+                        LOG_DEBUG(log, "MergingAggregatedStep final: {}", aggregate_final);
+                        auto transform_params = std::make_shared<AggregatingTransformParams>(aggregating_step->getParams(), aggregate_final);
                         transform_params->params.intermediate_header = new_node->step->getOutputStream().header;
 
                         auto merging_aggregated = std::make_unique<MergingAggregatedStep>(

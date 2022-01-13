@@ -66,7 +66,7 @@ void GRPCClient::prepareRead(const GRPCTicket & ticket_)
     inner_context = std::make_unique<InnerContext>(ch, ctx, stub, reader);
 }
 
-Block GRPCClient::read()
+GRPCClient::MessageType GRPCClient::read(Block & block)
 {
     assert(inner_context);
 
@@ -85,14 +85,33 @@ Block GRPCClient::read()
             throw Exception(result.exception().display_text(), result.exception().code(), true);
         }
 
-        if (result.output().size() == 0)
-            return {}; /// Read EOF
+        /// Note: totals and extremes are not used and not tested yet.
+        if (result.totals().size() > 0)
+        {
+            ReadBufferFromString b(result.totals());
+            NativeReader reader(b, 0);
+            block = reader.read();
+            LOG_DEBUG(log, "Read totals from {} success, result size: {}, block rows: {}.", addr, result.output().size(), block.rows());
+            return MessageType::Totals;
+        }
 
-        ReadBufferFromString b(result.output());
-        NativeReader reader(b, 0 /* server_revision_ */);
-        Block block = reader.read();
-        LOG_DEBUG(log, "Read from {} success, result size: {}, block rows: {}.", addr, result.output().size(), block.rows());
-        return block;
+        if (result.extremes().size() > 0)
+        {
+            ReadBufferFromString b(result.extremes());
+            NativeReader reader(b, 0);
+            block = reader.read();
+            LOG_DEBUG(log, "Read extremes from {} success, result size: {}, block rows: {}.", addr, result.output().size(), block.rows());
+            return MessageType::Extremes;
+        }
+
+        if (!result.output().empty())
+        {
+            ReadBufferFromString b(result.output());
+            NativeReader reader(b, 0);
+            block = reader.read();
+            LOG_DEBUG(log, "Read data from {} success, result size: {}, block rows: {}.", addr, result.output().size(), block.rows());
+        }
+        return MessageType::Data;
     }
 
     throw Exception(

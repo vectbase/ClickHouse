@@ -95,9 +95,55 @@ void DistributedSource::onUpdatePorts()
     }
 }
 
-Pipe createDistributedSourcePipe(DistributedSourceExecutorPtr query_executor, bool add_aggregation_info, bool async_read)
+DistributedTotalsSource::DistributedTotalsSource(DistributedSourceExecutorPtr executor_)
+    : ISource(executor_->getHeader())
+    , executor(std::move(executor_))
 {
-    Pipe pipe(std::make_shared<DistributedSource>(query_executor, add_aggregation_info, async_read));
+}
+
+DistributedTotalsSource::~DistributedTotalsSource() = default;
+
+Chunk DistributedTotalsSource::generate()
+{
+    if (auto block = executor->getTotals())
+    {
+        UInt64 num_rows = block.rows();
+        return Chunk(block.getColumns(), num_rows);
+    }
+
+    return {};
+}
+
+DistributedExtremesSource::DistributedExtremesSource(DistributedSourceExecutorPtr executor_)
+    : ISource(executor_->getHeader())
+    , executor(std::move(executor_))
+{
+}
+
+DistributedExtremesSource::~DistributedExtremesSource() = default;
+
+Chunk DistributedExtremesSource::generate()
+{
+    if (auto block = executor->getExtremes())
+    {
+        UInt64 num_rows = block.rows();
+        return Chunk(block.getColumns(), num_rows);
+    }
+
+    return {};
+}
+
+Pipe createDistributedSourcePipe(
+    DistributedSourceExecutorPtr executor, bool add_aggregation_info, bool /*add_totals*/, bool /*add_extremes*/, bool async_read)
+{
+    Pipe pipe(std::make_shared<DistributedSource>(executor, add_aggregation_info, async_read));
+
+//    if (add_totals)
+//        pipe.addTotalsSource(std::make_shared<DistributedTotalsSource>(executor));
+//
+//    if (add_extremes)
+//        pipe.addExtremesSource(std::make_shared<DistributedExtremesSource>(executor));
+
     return pipe;
 }
 
