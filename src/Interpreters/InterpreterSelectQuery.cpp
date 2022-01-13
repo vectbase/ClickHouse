@@ -439,7 +439,7 @@ InterpreterSelectQuery::InterpreterSelectQuery(
             std::move(subquery_for_sets),
             std::move(prepared_sets));
 
-        /// Process SQL just like "SELECT ... FROM _temporary_and_external_tables.`_tmp_fbe82e3a-1815-4563-bbe8-2e3a1815e563`"
+        /// For SQL just like "SELECT ... FROM _temporary_and_external_tables.`_tmp_fbe82e3a-1815-4563-bbe8-2e3a1815e563`"
         if (!query_analyzer->getExternalTables().empty())
             context->setSkipDistributedPlan(true);
 
@@ -509,7 +509,7 @@ InterpreterSelectQuery::InterpreterSelectQuery(
         result_header = getSampleBlockImpl();
         /// Maybe subquery has been rewritten with "_subqueryX", so reset distributed_query.
         String maybe_rewritten_query = queryToString(query_ptr);
-        LOG_DEBUG(log, "[{}] Rewrite \"{}\" to \"{}\"", static_cast<void*>(context.get()), context->getClientInfo().distributed_query, maybe_rewritten_query);
+        LOG_DEBUG(log, "[{}] Rewrite from \"{}\" to \"{}\"", static_cast<void*>(context.get()), context->getClientInfo().distributed_query, maybe_rewritten_query);
         context->getClientInfo().distributed_query = std::move(maybe_rewritten_query);
     };
 

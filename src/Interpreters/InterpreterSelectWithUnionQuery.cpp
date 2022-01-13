@@ -167,24 +167,24 @@ InterpreterSelectWithUnionQuery::InterpreterSelectWithUnionQuery(
     options.ignore_limits |= all_nested_ignore_limits;
     options.ignore_quota |= all_nested_ignore_quota;
 
-    context->getClientInfo().distributed_query.clear();
+    String rewritten_query;
     for (size_t query_num = 0; query_num < num_children; ++query_num)
     {
-        context->getClientInfo().distributed_query += nested_interpreters[query_num]->getContext()->getClientInfo().distributed_query;
+        rewritten_query += nested_interpreters[query_num]->getContext()->getClientInfo().distributed_query;
 
         if (query_num < num_children - 1)
         {
             if (ast->union_mode == ASTSelectWithUnionQuery::Mode::Unspecified)
             {
-                context->getClientInfo().distributed_query += " UNION ";
+                rewritten_query += " UNION ";
             }
             else if (ast->union_mode == ASTSelectWithUnionQuery::Mode::ALL)
             {
-                context->getClientInfo().distributed_query += " UNION ALL ";
+                rewritten_query += " UNION ALL ";
             }
             else if (ast->union_mode == ASTSelectWithUnionQuery::Mode::DISTINCT)
             {
-                context->getClientInfo().distributed_query += " UNION DISTINCT ";
+                rewritten_query += " UNION DISTINCT ";
             }
             else
             {
@@ -192,7 +192,8 @@ InterpreterSelectWithUnionQuery::InterpreterSelectWithUnionQuery(
             }
         }
     }
-    LOG_DEBUG(log, "[{}] Rewrite to: {}", static_cast<void*>(context.get()), context->getClientInfo().distributed_query);
+    LOG_DEBUG(log, "[{}] Rewrite from \"{}\" to: \"{}\"", static_cast<void*>(context.get()), context->getClientInfo().distributed_query, rewritten_query);
+    context->getClientInfo().distributed_query = std::move(rewritten_query);
 }
 
 Block InterpreterSelectWithUnionQuery::getCommonHeaderForUnion(const Blocks & headers)
