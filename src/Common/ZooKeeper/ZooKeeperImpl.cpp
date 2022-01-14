@@ -754,10 +754,17 @@ void ZooKeeper::receiveEvent()
                                 callback(watch_response);
                     }
 
-                    if (path.rfind("/") != std::string::npos)
+                    auto pos = path.rfind("/");
+                    if (pos != std::string::npos)
                     {
-                        path = path.substr(0, path.rfind('/'));
-                        trimRight(path, '/');
+                        if (pos == 0 && path.length() > 1) {
+                            path = "/";
+                        }
+                        else
+                        {
+                            path = path.substr(0, pos);
+                            trimRight(path, '/');
+                        }
                     }
                 }
             }

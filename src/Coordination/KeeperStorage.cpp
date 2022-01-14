@@ -163,7 +163,7 @@ static void triggerWatches(const String rawPath, const String path, int depth, C
                     // in persistent-recursive mode, children changed event is redundant, so the node add/delete event path should be the raw path
                     watch_response->path = rawPath;
                 }
-                else if (depth == 0 || (depth == 1 && watcherType == WatcherType::Data))
+                else if (depth == 0 || (depth == 1 && watcherType == WatcherType::Children))
                     matched = true;
             }
 
