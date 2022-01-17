@@ -1184,7 +1184,9 @@ QueryPlanPtr MergeTreeDataSelectExecutor::readFromParts(
     );
 
     QueryPlanPtr plan = std::make_unique<QueryPlan>();
-    plan->addStep(std::move(read_from_merge_tree));
+    const auto & ast = query_info.query->as<ASTSelectQuery &>();
+    InterpreterParamsPtr interpreter_params = std::make_shared<InterpreterParams>(context, ast);
+    plan->addStep(std::move(read_from_merge_tree), std::move(interpreter_params));
     return plan;
 }
 

@@ -889,6 +889,18 @@ void QueryPlan::buildPlanFragment(ContextPtr context)
 
         if (one_child_is_visited)
         {
+            /// Transfer interpreter params bottom-up.
+            if (!frame.node->interpreter_params && last_node->interpreter_params)
+            {
+                frame.node->interpreter_params = last_node->interpreter_params;
+                LOG_DEBUG(
+                    log,
+                    "Set context({} <= {}) to {}",
+                    frame.node->step->getName(),
+                    last_node->step->getName(),
+                    static_cast<const void *>(frame.node->interpreter_params->context.get()));
+            }
+
             CheckShuffleResult result;
             checkShuffle(frame.node, last_node, result);
 
@@ -904,15 +916,15 @@ void QueryPlan::buildPlanFragment(ContextPtr context)
                     assert(last_node == frame.node->children[frame.visited_children]);
 
                     /// Add steps between current node and child node.
-                    auto addStep = [this, &stage_id](QueryPlanStepPtr step, const String & description, Node * & node)
+                    auto addStep = [this, &stage_id, &frame](QueryPlanStepPtr step, const String & description, Node * & node)
                     {
                         LOG_DEBUG(log, "Add step: {}, parent stage: {}", step->getName(), stage_id);
                         step->setStepDescription(description);
                         if (!node)
-                            nodes.emplace_back(Node{.step = std::move(step)});
+                            nodes.emplace_back(Node{.step = std::move(step), .interpreter_params = frame.node->interpreter_params});
                         else
                         {
-                            nodes.emplace_back(Node{.step = std::move(step), .children = {node}});
+                            nodes.emplace_back(Node{.step = std::move(step), .children = {node}, .interpreter_params = frame.node->interpreter_params});
                             node->parent = &nodes.back();
                         }
                         node = &nodes.back();
@@ -945,14 +957,16 @@ void QueryPlan::buildPlanFragment(ContextPtr context)
                     /// If parent stage has aggregate, add MergingAggregatedStep.
                     if (result.child_aggregating_step)
                     {
-                        const auto & settings = context->getSettingsRef();
+                        assert(frame.node->interpreter_params);
                         bool aggregate_final = !frame.node->interpreter_params->group_by_with_totals
                             && !frame.node->interpreter_params->group_by_with_rollup
                             && !frame.node->interpreter_params->group_by_with_cube;
                         LOG_DEBUG(log, "MergingAggregatedStep final: {}", aggregate_final);
+
                         auto transform_params = std::make_shared<AggregatingTransformParams>(aggregating_step->getParams(), aggregate_final);
                         transform_params->params.intermediate_header = new_node->step->getOutputStream().header;
 
+                        const auto & settings = context->getSettingsRef();
                         auto merging_aggregated = std::make_unique<MergingAggregatedStep>(
                             new_node->step->getOutputStream(),
                             std::move(transform_params),
