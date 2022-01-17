@@ -7,7 +7,7 @@
 namespace DB
 {
 DistributedSource::DistributedSource(DistributedSourceExecutorPtr executor, bool add_aggregation_info_, bool async_read_)
-    : SourceWithProgress(executor->getHeader(), false)
+    : SourceWithProgress(executor->getHeader())
     , query_executor(std::move(executor))
     , add_aggregation_info(add_aggregation_info_)
     , async_read(async_read_)
