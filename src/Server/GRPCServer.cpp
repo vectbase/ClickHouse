@@ -1714,9 +1714,6 @@ namespace
                 query_info_wrapper->profile_info = executor->getProfileInfo();
             }
             query_info_wrapper->notifyFinish();
-            /// Wait all consumers to finish.
-            query_info_wrapper->waitConsume();
-            LOG_DEBUG(log, "{} producer is {}.", query_info_key, (query_info_wrapper->cancel ? "cancelled" : "done"));
         }
     }
 
@@ -1775,6 +1772,7 @@ namespace
             throwIfFailedToSendResult();
         }
 
+        /// Throw exception which is from producer.
         if (query_info_wrapper->exception.code())
             throw Exception(query_info_wrapper->exception);
 
@@ -1861,7 +1859,6 @@ namespace
                 cancelPlanFragment();
                 query_info_wrapper->notifyFinish();
             }
-            query_info_key.clear();
         }
 
         io.onException();
@@ -1934,8 +1931,16 @@ namespace
         query_scope.reset();
         query_context.reset();
         session.reset();
-        if (!query_info_key.empty())
+        if (call_type == CALL_EXECUTE_PLAN_FRAGMENT && !query_info_key.empty())
+        {
+            if (query_info_wrapper)
+            {
+                /// Wait all consumers to finish.
+                query_info_wrapper->waitConsume();
+                LOG_DEBUG(log, "{} producer is {}.", query_info_key, (query_info_wrapper->cancel ? "cancelled" : "done"));
+            }
             query_info_map->erase(query_info_key);
+        }
     }
 
     void Call::readQueryInfo()
