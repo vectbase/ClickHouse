@@ -400,7 +400,8 @@ InterpreterSelectQuery::InterpreterSelectQuery(
         if (try_move_to_prewhere && storage && storage->supportsPrewhere() && query.where() && !query.prewhere())
         {
             /// PREWHERE optimization: transfer some condition from WHERE to PREWHERE if enabled and viable
-            if (const auto & column_sizes = storage->getColumnSizes(); !column_sizes.empty())
+            if (const auto & column_sizes = storage->getColumnSizes();
+                !column_sizes.empty() || context->getRunningMode() == Context::RunningMode::COMPUTE)
             {
                 /// Extract column compressed sizes.
                 std::unordered_map<std::string, UInt64> column_compressed_sizes;
