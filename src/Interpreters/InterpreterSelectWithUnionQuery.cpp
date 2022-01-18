@@ -15,6 +15,7 @@
 #include <Processors/QueryPlan/LimitStep.h>
 #include <Processors/QueryPlan/OffsetStep.h>
 #include <Processors/QueryPlan/Optimizations/QueryPlanOptimizationSettings.h>
+#include <Processors/QueryPlan/DistributedPlanner.h>
 #include <Common/typeid_cast.h>
 
 #include <Interpreters/InDepthNodeVisitor.h>
@@ -166,33 +167,27 @@ InterpreterSelectWithUnionQuery::InterpreterSelectWithUnionQuery(
     }
     options.ignore_limits |= all_nested_ignore_limits;
     options.ignore_quota |= all_nested_ignore_quota;
+}
 
+void InterpreterSelectWithUnionQuery::rewriteDistributedQuery(bool is_subquery, size_t)
+{
+    IInterpreterUnionOrSelectQuery::rewriteDistributedQuery(is_subquery);
+
+    size_t num_plans = nested_interpreters.size();
+    distributed_query_ptr = query_ptr->clone();
+    ASTSelectWithUnionQuery * distributed_ast = distributed_query_ptr->as<ASTSelectWithUnionQuery>();
     String rewritten_query;
-    for (size_t query_num = 0; query_num < num_children; ++query_num)
-    {
-        rewritten_query += nested_interpreters[query_num]->getContext()->getClientInfo().distributed_query;
 
-        if (query_num < num_children - 1)
-        {
-            if (ast->union_mode == ASTSelectWithUnionQuery::Mode::Unspecified)
-            {
-                rewritten_query += " UNION ";
-            }
-            else if (ast->union_mode == ASTSelectWithUnionQuery::Mode::ALL)
-            {
-                rewritten_query += " UNION ALL ";
-            }
-            else if (ast->union_mode == ASTSelectWithUnionQuery::Mode::DISTINCT)
-            {
-                rewritten_query += " UNION DISTINCT ";
-            }
-            else
-            {
-                throw Exception(ErrorCodes::LOGICAL_ERROR, "When rewriting SELECT with UNION, unimplemented UNION type: {}", ast->union_mode);
-            }
-        }
-    }
-    LOG_DEBUG(log, "[{}] Rewrite from \"{}\" to: \"{}\"", static_cast<void*>(context.get()), context->getClientInfo().distributed_query, rewritten_query);
+    for (size_t i = 0; i < num_plans; ++i)
+        distributed_ast->list_of_selects->children.at(i) = nested_interpreters[i]->getDistributedQueryPtr()->clone();
+
+    rewritten_query = queryToString(distributed_query_ptr);
+    LOG_DEBUG(
+        log,
+        "[{}] Rewrite\n\"{}\"\n=>\n\"{}\"",
+        static_cast<void *>(context.get()),
+        context->getClientInfo().distributed_query,
+        rewritten_query);
     context->getClientInfo().distributed_query = std::move(rewritten_query);
 }
 
@@ -288,6 +283,7 @@ void InterpreterSelectWithUnionQuery::buildQueryPlan(QueryPlan & query_plan)
     if (num_plans == 1)
     {
         nested_interpreters.front()->buildQueryPlan(query_plan);
+        nested_interpreters.front()->rewriteDistributedQuery(false);
     }
     else
     {
@@ -298,6 +294,7 @@ void InterpreterSelectWithUnionQuery::buildQueryPlan(QueryPlan & query_plan)
         {
             plans[i] = std::make_unique<QueryPlan>();
             nested_interpreters[i]->buildQueryPlan(*plans[i]);
+            nested_interpreters[i]->rewriteDistributedQuery(false);
 
             if (!blocksHaveEqualStructure(plans[i]->getCurrentDataStream().header, result_header))
             {
@@ -356,20 +353,15 @@ BlockIO InterpreterSelectWithUnionQuery::execute()
     QueryPlan query_plan;
     buildQueryPlan(query_plan);
 
-    {
-        /// Print the original query plan for debugging distributed table.
-        /// TODO: This will be removed in the future.
-        WriteBufferFromOwnString buf;
-        buf << "------ DEBUG Query Plan ------\n";
-        buf << "SQL: " << context->getClientInfo().distributed_query << "\n";
-        QueryPlan::ExplainPlanOptions options{.header = true, .actions = true};
-        query_plan.explainPlan(buf, options);
-        LOG_DEBUG(log, "[{}] DEBUG query plan:\n{}", static_cast<void*>(context.get()), buf.str());
-    }
+    rewriteDistributedQuery(false);
 
-    bool is_built = query_plan.buildDistributedPlan(context);
+    query_plan.checkInitialized();
+    query_plan.optimize(QueryPlanOptimizationSettings::fromContext(context));
 
-    QueryPlanOptimizationSettings optimization_settings{.optimize_plan = !is_built};
+    DistributedPlanner planner(query_plan, context);
+    planner.buildDistributedPlan();
+
+    QueryPlanOptimizationSettings optimization_settings{.optimize_plan = false};
     auto pipeline_builder = query_plan.buildQueryPipeline(
         optimization_settings,
         BuildQueryPipelineSettings::fromContext(context));

@@ -194,6 +194,8 @@ protected:
 
     bool isRemoteStorage() const { return syntax->is_remote_storage; }
 
+    bool shouldAddExternalStorage() const { return syntax->should_add_external_storage; }
+
     NamesAndTypesList getColumnsAfterArrayJoin(ActionsDAGPtr & actions, const NamesAndTypesList & src_columns);
     NamesAndTypesList analyzeJoin(ActionsDAGPtr & actions, const NamesAndTypesList & src_columns);
 };

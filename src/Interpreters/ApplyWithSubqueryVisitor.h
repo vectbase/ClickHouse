@@ -3,6 +3,7 @@
 #include <map>
 
 #include <Parsers/IAST.h>
+#include <Interpreters/InDepthNodeVisitor.h>
 
 namespace DB
 {
@@ -30,5 +31,20 @@ private:
     static void visit(ASTTableExpression & table, const Data & data);
     static void visit(ASTFunction & func, const Data & data);
 };
+
+class ReplaceSubqueryMatcher
+{
+public:
+    struct Data
+    {
+        ASTPtr query;
+        bool done = false;
+    };
+
+    static bool needChildVisit(ASTPtr & node, const ASTPtr & child, Data & data);
+    static void visit(ASTPtr & ast, Data & data);
+};
+
+using ReplaceSubqueryVisitor = InDepthNodeVisitor<ReplaceSubqueryMatcher, true, true>;
 
 }

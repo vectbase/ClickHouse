@@ -217,15 +217,17 @@ namespace
     String getQueryDescription(const GRPCQueryInfo & query_info)
     {
         String str;
+        if (!query_info.initial_query_id().empty())
+            str.append("query info key: ").append(query_info.initial_query_id() + "/" + toString(query_info.stage_id()));
         if (!query_info.query().empty())
         {
             std::string_view query = query_info.query();
-            constexpr size_t max_query_length_to_log = 64;
+            constexpr size_t max_query_length_to_log = 512;
             if (query.length() > max_query_length_to_log)
                 query.remove_suffix(query.length() - max_query_length_to_log);
             if (size_t format_pos = query.find(" FORMAT "); format_pos != String::npos)
                 query.remove_suffix(query.length() - format_pos - strlen(" FORMAT "));
-            str.append("\"").append(query);
+            str.append(str.empty() ? "" : ", ").append("query: ").append("\"").append(query);
             if (query != query_info.query())
                 str.append("...");
             str.append("\"");
@@ -1112,7 +1114,7 @@ namespace
 
         readTicket();
 
-        LOG_DEBUG(log, "Received ticket: {}", ticket.initial_query_id() + "/" + std::to_string(ticket.stage_id()) + "/" + ticket.node_id());
+        LOG_DEBUG(log, "Received ticket: {}", ticket.initial_query_id() + "/" + std::to_string(ticket.stage_id()) + "|" + ticket.node_id());
     }
 
     void Call::executeQuery()
@@ -1322,6 +1324,7 @@ namespace
             throw Exception("Query info key " + query_info_key + " already exists", ErrorCodes::LOGICAL_ERROR);
         }
         query_info_wrapper = res.first->second;
+        LOG_DEBUG(log, "Store query info key {}", query_info_key);
     }
 
     void Call::loadQueryInfoWrapper(bool is_cancel)
@@ -1329,7 +1332,10 @@ namespace
         query_info_key = ticket.initial_query_id() + "/" + std::to_string(ticket.stage_id());
         auto res = query_info_map->get(query_info_key);
         if (res.second)
+        {
             query_info_wrapper = res.first;
+            LOG_DEBUG(log, "Load query info key {} to {}", query_info_key, ticket.node_id());
+        }
         else
         {
             if (is_cancel) /// Plan fragment maybe done.
@@ -1496,6 +1502,7 @@ namespace
                     auto temporary_table = TemporaryTableHolder(query_context, ColumnsDescription{columns}, {});
                     storage = temporary_table.getTable();
                     query_context->addExternalTable(temporary_id.table_name, std::move(temporary_table));
+                    LOG_DEBUG(log, "Add external table {} to context {}", temporary_id.table_name, static_cast<void*>(query_context.get()));
                 }
 
                 if (!external_table.data().empty())
@@ -1747,7 +1754,7 @@ namespace
                 break;
 
             block = query_info_wrapper->blocks[index];
-            LOG_DEBUG(log, "{}/{} consume 1 block: {} rows, {} columns, {} bytes.", query_info_key, ticket.node_id(), block.rows(), block.columns(), block.bytes());
+            LOG_DEBUG(log, "{}|{} consume 1 block: {} rows, {} columns, {} bytes.", query_info_key, ticket.node_id(), block.rows(), block.columns(), block.bytes());
             query_info_wrapper->notifyProduce();
 
             throwIfFailedToSendResult();
@@ -1786,7 +1793,7 @@ namespace
         output_format_processor->doWriteSuffix();
         /// Notify producer that current consumer is finished.
         query_info_wrapper->notifyProduce();
-        LOG_DEBUG(log, "{}/{} consumer is {}.", query_info_key, ticket.node_id(), (query_info_wrapper->cancel ? "cancelled" : "done"));
+        LOG_DEBUG(log, "{}|{} consumer is {}.", query_info_key, ticket.node_id(), (query_info_wrapper->cancel ? "cancelled" : "done"));
     }
 
     void Call::cancelPlanFragment()

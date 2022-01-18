@@ -14,6 +14,7 @@ class IInterpreterUnionOrSelectQuery : public IInterpreter
 public:
     IInterpreterUnionOrSelectQuery(const ASTPtr & query_ptr_, ContextPtr context_, const SelectQueryOptions & options_)
         : query_ptr(query_ptr_)
+        , distributed_query_ptr(query_ptr->clone())
         , context(Context::createCopy(context_))
         , options(options_)
         , max_streams(context->getSettingsRef().max_threads)
@@ -30,6 +31,8 @@ public:
         context->getClientInfo().distributed_query = queryToString(query_ptr);
     }
 
+    virtual void rewriteDistributedQuery(bool is_subquery, size_t tables_count = 0);
+
     virtual void buildQueryPlan(QueryPlan & query_plan) = 0;
     QueryPipelineBuilder buildQueryPipeline();
 
@@ -45,8 +48,13 @@ public:
 
     const ContextMutablePtr & getContext() const { return context; }
 
+    const ASTPtr & getQueryPtr() const { return query_ptr; }
+
+    const ASTPtr & getDistributedQueryPtr() const { return distributed_query_ptr; }
+
 protected:
     ASTPtr query_ptr;
+    ASTPtr distributed_query_ptr;
     ContextMutablePtr context;
     Block result_header;
     SelectQueryOptions options;

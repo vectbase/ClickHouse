@@ -114,6 +114,10 @@ public:
 
             auto interpreter = interpretSubquery(subquery_or_table_name, getContext(), subquery_depth, {});
 
+            /// The main purpose is to reset plan fragment info, so subquery can be executed as a initial query.
+            /// Because if parent query is a secondary query, the subquery will not be executed completely.
+            interpreter->rewriteDistributedQuery(true);
+
             Block sample = interpreter->getSampleBlock();
             NamesAndTypesList columns = sample.getNamesAndTypesList();
 

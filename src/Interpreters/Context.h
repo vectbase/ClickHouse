@@ -313,7 +313,6 @@ public:
 private:
     bool skip_distributed_plan = false;
     std::optional<QueryPlanFragmentInfo> query_plan_fragment_info; /// It has no value if current node is initial compute node.
-    String select_query;
 
     using SampleBlockCache = std::unordered_map<std::string, Block>;
     mutable SampleBlockCache sample_block_cache;
@@ -523,9 +522,11 @@ public:
     bool isInitialQuery() const { return !query_plan_fragment_info; }
     const QueryPlanFragmentInfo & getQueryPlanFragmentInfo() const { return query_plan_fragment_info.value(); }
     void setQueryPlanFragmentInfo(const QueryPlanFragmentInfo & query_plan_fragment_info_) { query_plan_fragment_info = query_plan_fragment_info_; }
-
-    const String & getSelectQuery() const { return select_query; }
-    void setSelectQuery(const String & select_query_) { select_query = select_query_; }
+    void resetQueryPlanFragmentInfo()
+    {
+        if (query_plan_fragment_info)
+            query_plan_fragment_info.reset();
+    }
 
     StoragePtr executeTableFunction(const ASTPtr & table_expression);
 

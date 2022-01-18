@@ -63,6 +63,7 @@
 #include <Processors/Transforms/AggregatingTransform.h>
 #include <Processors/Transforms/ExpressionTransform.h>
 #include <Processors/Transforms/FilterTransform.h>
+#include <Processors/QueryPlan/DistributedPlanner.h>
 
 #include <Storages/MergeTree/MergeTreeWhereOptimizer.h>
 #include <Storages/IStorage.h>
@@ -348,7 +349,10 @@ InterpreterSelectQuery::InterpreterSelectQuery(
     {
         interpreter_subquery = joined_tables.makeLeftTableSubquery(options.subquery());
         if (interpreter_subquery)
+        {
             source_header = interpreter_subquery->getSampleBlock();
+            interpreter_subquery->rewriteDistributedQuery(true);
+        }
     }
 
     joined_tables.rewriteDistributedInAndJoins(query_ptr);
@@ -464,7 +468,7 @@ InterpreterSelectQuery::InterpreterSelectQuery(
                 if (!context->tryResolveStorageID({"", it.first}, Context::ResolveExternal))
                 {
                     context->addExternalTable(it.first, std::move(*it.second));
-                    LOG_DEBUG(log, "Add external table to context {}", static_cast<void*>(context.get()));
+                    LOG_DEBUG(log, "Add external table {} to context {}", it.first, static_cast<void*>(context.get()));
                 }
         }
 
@@ -508,10 +512,9 @@ InterpreterSelectQuery::InterpreterSelectQuery(
 
         /// Calculate structure of the result.
         result_header = getSampleBlockImpl();
-        /// Maybe subquery has been rewritten with "_subqueryX", so reset distributed_query.
-        String maybe_rewritten_query = queryToString(query_ptr);
-        LOG_DEBUG(log, "[{}] Rewrite from \"{}\" to \"{}\"", static_cast<void*>(context.get()), context->getClientInfo().distributed_query, maybe_rewritten_query);
-        context->getClientInfo().distributed_query = std::move(maybe_rewritten_query);
+
+        distributed_query_ptr = query_ptr->clone();
+        rewriteDistributedQuery(false, joined_tables.tablesCount());
     };
 
     analyze(shouldMoveToPrewhere());
@@ -579,6 +582,26 @@ InterpreterSelectQuery::InterpreterSelectQuery(
     sanitizeBlock(result_header, true);
 }
 
+void InterpreterSelectQuery::rewriteDistributedQuery(bool is_subquery, size_t tables_count)
+{
+    IInterpreterUnionOrSelectQuery::rewriteDistributedQuery(is_subquery);
+
+    if (interpreter_subquery && tables_count == 1)
+    {
+        ReplaceSubqueryVisitor::Data data{.query = interpreter_subquery->getDistributedQueryPtr()};
+        ReplaceSubqueryVisitor(data).visit(distributed_query_ptr);
+    }
+
+    String maybe_rewritten_query = queryToString(distributed_query_ptr);
+    LOG_DEBUG(
+        log,
+        "[{}] Rewrite\n\"{}\"\n=>\n\"{}\"",
+        static_cast<void *>(context.get()),
+        context->getClientInfo().distributed_query,
+        maybe_rewritten_query);
+    context->getClientInfo().distributed_query = std::move(maybe_rewritten_query);
+}
+
 void InterpreterSelectQuery::buildQueryPlan(QueryPlan & query_plan)
 {
     executeImpl(query_plan, std::move(input_pipe));
@@ -607,9 +630,13 @@ BlockIO InterpreterSelectQuery::execute()
 
     buildQueryPlan(query_plan);
 
-    bool is_built = query_plan.buildDistributedPlan(context);
+    query_plan.checkInitialized();
+    query_plan.optimize(QueryPlanOptimizationSettings::fromContext(context));
 
-    QueryPlanOptimizationSettings optimization_settings{.optimize_plan = !is_built};
+    DistributedPlanner planner(query_plan, context);
+    planner.buildDistributedPlan();
+
+    QueryPlanOptimizationSettings optimization_settings{.optimize_plan = false};
     res.pipeline = QueryPipelineBuilder::getPipeline(std::move(*query_plan.buildQueryPipeline(
         optimization_settings, BuildQueryPipelineSettings::fromContext(context))));
     return res;
@@ -1228,7 +1255,9 @@ void InterpreterSelectQuery::executeImpl(QueryPlan & query_plan, std::optional<P
 
             // If there is no global subqueries, we can run subqueries only when receive them on server.
             if (!query_analyzer->hasGlobalSubqueries() && !subqueries_for_sets.empty())
+            {
                 executeSubqueriesInSetsAndJoins(query_plan, subqueries_for_sets);
+            }
         }
 
         if (expressions.second_stage || from_aggregation_stage)
@@ -1909,6 +1938,8 @@ void InterpreterSelectQuery::executeFetchColumns(QueryProcessingStage::Enum proc
 
             if (query_analyzer->hasAggregation())
                 interpreter_subquery->ignoreWithTotals();
+
+            interpreter_subquery->rewriteDistributedQuery(true);
         }
 
         interpreter_subquery->buildQueryPlan(query_plan);

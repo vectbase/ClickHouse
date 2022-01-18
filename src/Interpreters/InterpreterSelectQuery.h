@@ -76,6 +76,8 @@ public:
 
     ~InterpreterSelectQuery() override;
 
+    virtual void rewriteDistributedQuery(bool is_subquery, size_t tables_count) override;
+
     /// Execute a query. Get the stream of blocks to read.
     BlockIO execute() override;
 

@@ -15,7 +15,7 @@ DistributedSourceExecutor::DistributedSourceExecutor(
     , node_id(node_id_)
     , stage_id(stage_id_)
     , client(*source_)
-    , log(&Poco::Logger::get("DistributedSourceExecutor(" + query_id + "/" + toString(stage_id) + "/" + node_id + ")"))
+    , log(&Poco::Logger::get("DistributedSourceExecutor(" + query_id + "/" + toString(stage_id) + "/" + *source + ")"))
 {
     GRPCTicket ticket;
     ticket.set_initial_query_id(query_id);

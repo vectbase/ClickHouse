@@ -70,6 +70,8 @@ struct TreeRewriterResult
     /// Cache isRemote() call for storage, because it may be too heavy.
     bool is_remote_storage = false;
 
+    bool should_add_external_storage = false;
+
     /// Results of scalar sub queries
     Scalars scalars;
 

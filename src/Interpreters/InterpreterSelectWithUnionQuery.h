@@ -24,6 +24,8 @@ public:
 
     ~InterpreterSelectWithUnionQuery() override;
 
+    virtual void rewriteDistributedQuery(bool is_subquery, size_t tables_count = 0) override;
+
     /// Builds QueryPlan for current query.
     virtual void buildQueryPlan(QueryPlan & query_plan) override;
 
