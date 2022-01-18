@@ -456,7 +456,8 @@ bool QueryPlan::scheduleStages(ContextMutablePtr context)
     static std::unordered_set<String> special_storages{"HDFS", "S3", "MySQL", "Memory"};
 
     bool is_result_stage_moved_forward = false;
-    auto fillStage = [&store_replicas, &compute_replicas, this, &my_replica, &is_result_stage_moved_forward](Stage * stage)
+    /// Fill workers of stages with compute and store replicas, stages includes leaf stage, result stage, intermediate stage.
+    auto fillStage = [&store_replicas, this, &my_replica, &is_result_stage_moved_forward](Stage * stage)
     {
         /// Leaf stage.
         if (stage->is_leaf_stage)
@@ -533,8 +534,8 @@ bool QueryPlan::scheduleStages(ContextMutablePtr context)
         }
 
         /// Intermediate stage.
-        stage->workers.reserve(compute_replicas.size());
-        stage->workers.insert(stage->workers.end(), compute_replicas.begin(), compute_replicas.end());
+        stage->workers.reserve(1);
+        stage->workers.emplace_back(std::make_shared<String>(my_replica));
     };
 
     struct Frame
