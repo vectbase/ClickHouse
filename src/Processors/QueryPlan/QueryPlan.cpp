@@ -476,7 +476,10 @@ bool QueryPlan::scheduleStages(ContextMutablePtr context)
                     /// It's StorageValues.
                     else if (leaf_node->step->getStepDescription() == "Values")
                     {
-                        stage->has_view_source = true;
+                        /// StorageValues is used in:
+                        /// 1. Trigger materalized view: has view source.
+                        /// 2. Execute "SELECT ... FROM values(...)": has no view source.
+                        stage->maybe_has_view_source = true;
                     }
                     else if (leaf_node->step->getStepDescription() == "Input")
                     {
@@ -669,8 +672,6 @@ bool QueryPlan::scheduleStages(ContextMutablePtr context)
         /// Fill with data related to each stage.
         query_info.set_query_id(context->generateQueryId());
         query_info.set_stage_id(stage.id);
-        query_info.set_has_view_source(stage.has_view_source);
-        query_info.set_has_input_function(stage.has_input_function);
 
         /// TODO: Not all stages need external tables, so choose the ones that are necessary, at least for leaf stages.
         /// Fill external tables(reference from Connection.cpp: void Connection::sendExternalTablesData(ExternalTablesData & data)):
@@ -816,22 +817,26 @@ bool QueryPlan::scheduleStages(ContextMutablePtr context)
             query_info.set_node_id(*worker);
             LOG_DEBUG(log, "Remote plan fragment:\n{}", debugRemotePlanFragment(query_info.query(), *worker, initial_query_id, &stage));
 
-            if (stage.has_view_source || stage.has_input_function)
+            if (stage.maybe_has_view_source || stage.has_input_function)
             {
                 const String & plan_fragment_id
                     = query_info.initial_query_id() + "/" + toString(query_info.stage_id()) + "/" + query_info.node_id();
-                if (stage.has_view_source)
+                if (stage.maybe_has_view_source)
                 {
                     const auto & view_source = context->getViewSource();
-                    assert(view_source);
-                    LOG_DEBUG(
-                        log,
-                        "Store initial context {} for plan fragment {}, because has view source: {}({}).",
-                        static_cast<void *>(context.get()),
-                        plan_fragment_id,
-                        view_source->getStorageID().getFullNameNotQuoted(),
-                        view_source->getName());
-                    context->addInitialContext(plan_fragment_id, context);
+                    if (view_source)
+                    {
+                        LOG_DEBUG(
+                            log,
+                            "Store initial context {} for plan fragment {}, because has view source: {}({}).",
+                            static_cast<void *>(context.get()),
+                            plan_fragment_id,
+                            view_source->getStorageID().getFullNameNotQuoted(),
+                            view_source->getName());
+                        context->addInitialContext(plan_fragment_id, context);
+                    }
+                    else
+                        stage.maybe_has_view_source = false;
                 }
                 else
                 {
@@ -842,8 +847,9 @@ bool QueryPlan::scheduleStages(ContextMutablePtr context)
                         plan_fragment_id);
                     context->addInitialContext(plan_fragment_id, context->getQueryContext());
                 }
-
             }
+            query_info.set_has_view_source(stage.maybe_has_view_source);
+            query_info.set_has_input_function(stage.has_input_function);
 
             GRPCClient cli(*worker);
             auto result = cli.executePlanFragment(query_info);
