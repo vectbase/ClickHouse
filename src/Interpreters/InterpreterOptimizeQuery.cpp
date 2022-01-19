@@ -5,6 +5,7 @@
 #include <Interpreters/InterpreterOptimizeQuery.h>
 #include <Access/AccessRightsElement.h>
 #include <Common/typeid_cast.h>
+#include <Databases/DatabaseReplicated.h>
 #include <Parsers/ASTExpressionList.h>
 
 #include <Interpreters/processColumnTransformers.h>
@@ -69,7 +70,20 @@ BlockIO InterpreterOptimizeQuery::execute()
         }
     }
 
+    if (auto * ptr = typeid_cast<DatabaseReplicated *>(DatabaseCatalog::instance().getDatabase(table_id.database_name).get());
+        ptr && !getContext()->getClientInfo().is_replicated_database_internal)
+    {
+        const_cast<ASTOptimizeQuery &>(ast).database = table_id.database_name;
+        return ptr->tryEnqueueReplicatedDDL(query_ptr, getContext());
+    }
+
     table->optimize(query_ptr, metadata_snapshot, ast.partition, ast.final, ast.deduplicate, column_names, getContext());
+
+    if (auto * ptr = typeid_cast<DatabaseReplicated *>(DatabaseCatalog::instance().getDatabase(table_id.database_name).get());
+        ptr && getContext()->getClientInfo().is_replicated_database_internal)
+    {
+        ptr->commitDatabase(getContext());
+    }
 
     return {};
 }
