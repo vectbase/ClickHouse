@@ -3,6 +3,8 @@
 #include <Interpreters/DDLTask.h>
 #include <Interpreters/AddDefaultDatabaseVisitor.h>
 #include <Interpreters/Context.h>
+#include <Interpreters/InterpreterCreateQuery.h>
+#include <Interpreters/executeQuery.h>
 #include <Parsers/ASTQueryWithOutput.h>
 #include <Parsers/ASTQueryWithOnCluster.h>
 #include <Parsers/ASTAlterQuery.h>
@@ -160,6 +162,7 @@ BlockIO executeDDLQueryOnCluster(const ASTPtr & query_ptr_, ContextPtr context, 
     entry.hosts = std::move(hosts);
     entry.query = queryToString(query_ptr);
     entry.initiator = ddl_worker.getCommonHostID();
+    entry.query_ptr = query_ptr->clone();
     entry.setSettingsIfRequired(context);
     String node_path = ddl_worker.enqueueQuery(entry);
 
@@ -185,6 +188,7 @@ private:
     std::pair<String, UInt16> parseHostAndPort(const String & host_id) const;
 
     String node_path;
+    DDLLogEntry entry;
     ContextPtr context;
     Stopwatch watch;
     Poco::Logger * log;
@@ -250,6 +254,7 @@ DDLQueryStatusSource::DDLQueryStatusSource(
     const String & zk_node_path, const DDLLogEntry & entry, ContextPtr context_, const std::optional<Strings> & hosts_to_wait)
     : SourceWithProgress(getSampleBlock(context_, hosts_to_wait.has_value()), true)
     , node_path(zk_node_path)
+    , entry(entry)
     , context(context_)
     , watch(CLOCK_MONOTONIC_COARSE)
     , log(&Poco::Logger::get("DDLQueryStatusInputStream"))
@@ -293,7 +298,18 @@ Chunk DDLQueryStatusSource::generate()
     assert(num_hosts_finished <= waiting_hosts.size());
 
     if (all_hosts_finished || timeout_exceeded)
+    {
+        if (auto * create_query = entry.query_ptr->as<ASTCreateQuery>())
+        {
+            if (create_query->database.empty())
+                create_query->database = context->getCurrentDatabase();
+            LOG_DEBUG(log, "Fill table {}.{} when all hosts has finished table creation", create_query->database, create_query->table);
+            BlockIO fill_io = InterpreterCreateQuery(entry.query_ptr, context->getQueryContext()).fillTableIfNeeded(*create_query, true);
+            executeTrivialBlockIO(fill_io, context);
+        }
+
         return {};
+    }
 
     auto zookeeper = context->getZooKeeper();
     size_t try_number = 0;

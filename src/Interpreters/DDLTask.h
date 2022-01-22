@@ -72,6 +72,8 @@ struct DDLLogEntry
     String initiator; // optional
     std::optional<SettingsChanges> settings;
 
+    ASTPtr query_ptr;
+
     void setSettingsIfRequired(ContextPtr context);
     String toString() const;
     void parse(const String & data);

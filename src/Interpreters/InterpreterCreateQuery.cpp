@@ -1261,12 +1261,17 @@ BlockIO InterpreterCreateQuery::doCreateOrReplaceTable(ASTCreateQuery & create,
     }
 }
 
-BlockIO InterpreterCreateQuery::fillTableIfNeeded(const ASTCreateQuery & create)
+BlockIO InterpreterCreateQuery::fillTableIfNeeded(const ASTCreateQuery & create, bool need_fill)
 {
     /// If the query is a CREATE SELECT, insert the data into the table.
     if (create.select && !create.attach
         && !create.is_ordinary_view && !create.is_live_view && (!create.is_materialized_view || create.is_populate))
     {
+        auto database = DatabaseCatalog::instance().getDatabase(create.database);
+        if (getContext()->getSettingsRef().allow_experimental_database_replicated && database->getEngineName() == "Replicated"
+            && !need_fill)
+            return {};
+
         auto insert = std::make_shared<ASTInsertQuery>();
         insert->table_id = {create.database, create.table, create.uuid};
         insert->select = create.select->clone();
