@@ -37,8 +37,6 @@ class LimitStep;
 struct QueryPlanOptimizationSettings;
 struct BuildQueryPipelineSettings;
 
-class DistirbutedPlanner;
-
 namespace JSONBuilder
 {
     class IItem;
@@ -67,7 +65,6 @@ using InterpreterParamsPtr = std::shared_ptr<InterpreterParams>;
 class QueryPlan
 {
 public:
-    friend class DistirbutedPlanner;
     QueryPlan();
     ~QueryPlan();
     QueryPlan(QueryPlan &&);
@@ -138,7 +135,9 @@ public:
 
     using Nodes = std::list<Node>;
 
-public:
+private:
+    friend class DistributedPlanner;
+
     Nodes nodes;
     Node * root = nullptr;
 
