@@ -33,6 +33,7 @@ namespace ErrorCodes
     extern const int INCORRECT_QUERY;
     extern const int NOT_IMPLEMENTED;
     extern const int TABLE_IS_READ_ONLY;
+    extern const int UNSUPPORTED_METHOD;
 }
 
 
@@ -67,9 +68,7 @@ BlockIO InterpreterAlterQuery::executeToTable(const ASTAlterQuery & alter)
     DatabasePtr database = DatabaseCatalog::instance().getDatabase(table_id.database_name);
     if (typeid_cast<DatabaseReplicated *>(database.get())
         && !getContext()->getClientInfo().is_replicated_database_internal
-        && !alter.isAttachAlter()
-        && !alter.isFetchAlter()
-        && !alter.isDropPartitionAlter())
+        && !alter.isFetchAlter())
     {
         auto guard = DatabaseCatalog::instance().getDDLGuard(table_id.database_name, table_id.table_name);
         guard->releaseTableLock();
@@ -95,6 +94,8 @@ BlockIO InterpreterAlterQuery::executeToTable(const ASTAlterQuery & alter)
     for (const auto & child : alter.command_list->children)
     {
         auto * command_ast = child->as<ASTAlterCommand>();
+        if (command_ast->part)
+            throw Exception("Manipulating Part is not supported", ErrorCodes::UNSUPPORTED_METHOD);
         if (auto alter_command = AlterCommand::parse(command_ast))
         {
             alter_commands.emplace_back(std::move(*alter_command));
