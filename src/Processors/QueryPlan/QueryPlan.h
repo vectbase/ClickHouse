@@ -77,6 +77,8 @@ public:
     bool isCompleted() const; /// Tree is not empty and root hasOutputStream()
     const DataStream & getCurrentDataStream() const; /// Checks that (isInitialized() && !isCompleted())
 
+    void checkInitialized() const;
+    void checkNotCompleted() const;
     void optimize(const QueryPlanOptimizationSettings & optimization_settings);
 
     void reset();
@@ -140,9 +142,6 @@ private:
 
     Nodes nodes;
     Node * root = nullptr;
-
-    void checkInitialized() const;
-    void checkNotCompleted() const;
 
     /// Those fields are passed to QueryPipeline.
     size_t max_threads = 0;
