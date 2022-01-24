@@ -404,6 +404,7 @@ bool DistributedPlanner::scheduleStages(PlanResult & plan_result)
                     query_plan.root = parent->root_node;
                     stages.pop_back();
                     is_result_stage_moved_forward = true;
+                    return;
                 }
             }
             LOG_DEBUG(log, "Schedule stage {} to 1 worker(local).", stage->id);
@@ -411,9 +412,8 @@ bool DistributedPlanner::scheduleStages(PlanResult & plan_result)
         }
 
         /// Intermediate stage.
-        stage->workers.reserve(compute_replicas.size());
-        stage->workers.insert(stage->workers.end(), compute_replicas.begin(), compute_replicas.end());
-        LOG_DEBUG(log, "Schedule stage {} to {} workers.", stage->id, stage->workers.size());
+        stage->workers.emplace_back(std::make_shared<String>(my_replica));
+        LOG_DEBUG(log, "Schedule stage {} to 1 worker(local).", stage->id);
     };
 
     struct Frame
