@@ -1204,7 +1204,7 @@ void InterpreterSelectQuery::executeImpl(QueryPlan & query_plan, std::optional<P
                 }
             }
 
-            if (!query_info.projection && expressions.hasWhere())
+            if (!query_info.projection && expressions.hasWhere() && !expressions.optimize_trivial_count)
                 executeWhere(query_plan, expressions.before_where, expressions.remove_where_filter);
 
             if (expressions.need_aggregate)
@@ -1791,8 +1791,7 @@ void InterpreterSelectQuery::executeFetchColumns(QueryProcessingStage::Enum proc
 
     /// Optimization for trivial query like SELECT count() FROM table.
     bool optimize_trivial_count =
-        context->getRunningMode() == Context::RunningMode::STORE
-        && syntax_analyzer_result->optimize_trivial_count
+        syntax_analyzer_result->optimize_trivial_count
         && (settings.max_parallel_replicas <= 1)
         && storage
         && storage->getName() != "MaterializedMySQL"
@@ -1850,13 +1849,11 @@ void InterpreterSelectQuery::executeFetchColumns(QueryProcessingStage::Enum proc
             auto source = std::make_shared<SourceFromSingleChunk>(block_with_count);
             auto prepared_count = std::make_unique<ReadFromPreparedSource>(Pipe(std::move(source)), context);
             prepared_count->setStepDescription("Optimized trivial count");
-            query_plan.addStep(std::move(prepared_count));
-            if (context->isInitialQuery())
-            {
-                /// If initial query is running on store worker, skip first stage.
-                from_stage = QueryProcessingStage::WithMergeableState;
-                analysis_result.first_stage = false;
-            }
+            const auto & ast = query_info.query->as<ASTSelectQuery &>();
+            InterpreterParamsPtr interpreter_params = std::make_shared<InterpreterParams>(context, ast);
+            query_plan.addStep(std::move(prepared_count), std::move(interpreter_params));
+            /// Build query plan for the first stage both on compute and store nodes, therefore we can get the same original query plan.
+            /// If trivial count is optimized, skip executeWhere.
             analysis_result.optimize_trivial_count = true;
             return;
         }

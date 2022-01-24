@@ -53,6 +53,7 @@ private:
         SortingStep * child_sorting_step = nullptr;
         LimitStep * current_limit_step = nullptr;
         LimitStep * child_limit_step = nullptr;
+        IQueryPlanStep * grandchild_step = nullptr;
     };
     void checkShuffle(QueryPlan::Node * current_node, QueryPlan::Node * child_node, CheckShuffleResult & result);
 

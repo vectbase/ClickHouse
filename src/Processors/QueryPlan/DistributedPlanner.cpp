@@ -65,6 +65,7 @@ void DistributedPlanner::checkShuffle(QueryPlan::Node * current_node, QueryPlan:
     {
         LOG_DEBUG(log, "Check shuffle: child node is AggregatingStep");
         result.is_shuffle = true;
+        result.grandchild_step = child_node->children.front()->step.get();
         return;
     }
 
@@ -826,8 +827,11 @@ void DistributedPlanner::buildPlanFragment(PlanResult & plan_result)
                         aggregating_step = std::make_unique<AggregatingStep>(*result.child_aggregating_step);
                     }
                     /// The aggregating_step header will include aggregate function.
-                    const auto & header = result.child_aggregating_step == nullptr ? last_node->step->getOutputStream().header
-                                                                                   : aggregating_step->getOutputStream().header;
+                    const auto & header = result.child_aggregating_step == nullptr
+                        ? last_node->step->getOutputStream().header
+                        : ((result.child_aggregating_step->getParams().optimize_trivial_count && result.grandchild_step)
+                               ? result.grandchild_step->getOutputStream().header
+                               : aggregating_step->getOutputStream().header);
 
                     /// Create DistributedSourceStep.
                     assert(header);
@@ -914,7 +918,7 @@ void DistributedPlanner::buildPlanFragment(PlanResult & plan_result)
                             }
                             replaceStep(std::move(aggregating_step), last_node);
                         }
-                            /// If optimize trivial count, remove AggregatingStep.
+                        /// If optimize trivial count, remove AggregatingStep.
                         else
                         {
                             LOG_DEBUG(log, "Remove step: {}, stage: {}", result.child_aggregating_step->getName(), stage_id);
