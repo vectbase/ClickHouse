@@ -125,6 +125,7 @@ message QueryInfo {
    repeated string sinks = 24;
    bool has_view_source = 25;
    bool has_input_function = 26;
+   bool empty_result_for_aggregation_by_empty_set = 27;
 }
 
 enum LogsLevel {

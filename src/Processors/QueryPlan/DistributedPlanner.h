@@ -24,6 +24,7 @@ private:
         bool is_leaf_stage = false; /// Current stage is a leaf stage if it has any leaf node reading data from storage(not from remote).
         bool maybe_has_view_source = false; /// Current stage reads data to trigger materialized view.
         bool has_input_function = false;
+        bool empty_result_for_aggregation_by_empty_set = false;
     };
 
     /// Note: do not use vector, otherwise pointers to elements in it will be invalidated when vector increases.

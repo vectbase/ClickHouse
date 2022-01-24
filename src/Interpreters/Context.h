@@ -305,6 +305,7 @@ public:
         String node_id; /// This is myself replica name and grpc port.
         std::unordered_map<int, std::vector<std::shared_ptr<String>>> parent_sources; /// Mapping of parent id and its workers.
         std::vector<std::shared_ptr<String>> sinks;   /// Point to workers that receiving data.
+        bool empty_result_for_aggregation_by_empty_set;
     };
 
     // Top-level OpenTelemetry trace context for the query. Makes sense only for a query context.

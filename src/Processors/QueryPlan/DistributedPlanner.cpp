@@ -146,6 +146,11 @@ void DistributedPlanner::buildStages()
             {
                 ++stage_id;
                 last_stage = createStage(stage_id, parent_stages, last_node, leaf_nodes);
+                if (result.child_aggregating_step)
+                {
+                    last_stage->empty_result_for_aggregation_by_empty_set
+                        = result.child_aggregating_step->getParams().empty_result_for_aggregation_by_empty_set;
+                }
 
                 /// The new stage is parent of current node's stage.
                 parent_stages.push(last_stage);
@@ -541,6 +546,7 @@ bool DistributedPlanner::scheduleStages(PlanResult & plan_result)
         /// Fill with data related to each stage.
         query_info.set_query_id(context->generateQueryId());
         query_info.set_stage_id(stage.id);
+        query_info.set_empty_result_for_aggregation_by_empty_set(stage.empty_result_for_aggregation_by_empty_set);
 
         /// TODO: Not all stages need external tables, so choose the ones that are necessary, at least for leaf stages.
         /// Fill external tables(reference from Connection.cpp: void Connection::sendExternalTablesData(ExternalTablesData & data)):
@@ -899,6 +905,13 @@ void DistributedPlanner::buildPlanFragment(PlanResult & plan_result)
                         if (!result.child_aggregating_step->getParams().optimize_trivial_count)
                         {
                             auto aggregating_step = std::make_unique<AggregatingStep>(*result.child_aggregating_step);
+                            if (query_distributed_plan_info.empty_result_for_aggregation_by_empty_set)
+                            {
+                                LOG_DEBUG(log, "Set (aggregating_step) param (empty_result_for_aggregation_by_empty_set) to {} for distributed query plan to keep compute and store nodes same",
+                                          query_distributed_plan_info.empty_result_for_aggregation_by_empty_set);
+                                aggregating_step->setEmptyResultForAggregationByEmptySet(
+                                    query_distributed_plan_info.empty_result_for_aggregation_by_empty_set);
+                            }
                             replaceStep(std::move(aggregating_step), last_node);
                         }
                             /// If optimize trivial count, remove AggregatingStep.

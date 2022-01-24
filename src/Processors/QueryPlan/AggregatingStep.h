@@ -42,6 +42,8 @@ public:
     void describePipeline(FormatSettings & settings) const override;
 
     const Aggregator::Params & getParams() const { return params; }
+    void setEmptyResultForAggregationByEmptySet(bool empty_result_for_aggregation_by_empty_set_) { params.empty_result_for_aggregation_by_empty_set =
+                                                                                                                                   empty_result_for_aggregation_by_empty_set_;}
 
 private:
     Aggregator::Params params;

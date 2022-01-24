@@ -1172,7 +1172,8 @@ namespace
                 .stage_id = query_info->stage_id(),
                 .node_id = query_info->node_id(),
                 .parent_sources = std::move(parent_sources),
-                .sinks = sinks };
+                .sinks = sinks,
+                .empty_result_for_aggregation_by_empty_set = query_info->empty_result_for_aggregation_by_empty_set()};
             query_context->setQueryPlanFragmentInfo(std::move(fragment_info));
         }
 
