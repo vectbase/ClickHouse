@@ -33,6 +33,7 @@
 #include <Access/ContextAccess.h>
 #include <Access/AllowedClientHosts.h>
 #include <Databases/IDatabase.h>
+#include <Databases/DatabaseReplicated.h>
 #include <Disks/DiskRestartProxy.h>
 #include <Storages/StorageDistributed.h>
 #include <Storages/StorageReplicatedMergeTree.h>
@@ -192,6 +193,7 @@ void InterpreterSystemQuery::startStopAction(StorageActionBlockType action_type,
             }
         }
     }
+    commitSystemQuery();
 }
 
 
@@ -205,10 +207,25 @@ BlockIO InterpreterSystemQuery::execute()
 {
     auto & query = query_ptr->as<ASTSystemQuery &>();
 
+    using Type = ASTSystemQuery::Type;
+
+    auto is_support_system_query_ddl = [](Type & type)
+    {
+        return Type::STOP_MERGES == type || Type::START_MERGES == type || Type::STOP_TTL_MERGES == type || Type::START_TTL_MERGES == type
+            || Type::FLUSH_LOGS == type;
+    };
+
+    if (!getContext()->getClientInfo().is_replicated_database_internal && is_support_system_query_ddl(query.type))
+    {
+        auto * ptr = typeid_cast<DatabaseReplicated *>(
+            DatabaseCatalog::instance().getDatabase(getContext()->getConfigRef().getString("default_database", "default")).get());
+        if (!ptr)
+            throw Exception("The default database is not Replicated engine", ErrorCodes::LOGICAL_ERROR);
+        return ptr->tryEnqueueReplicatedDDL(query_ptr, getContext());
+    }
+
     if (!query.cluster.empty())
         return executeDDLQueryOnCluster(query_ptr, getContext(), getRequiredAccessForDDLOnCluster());
-
-    using Type = ASTSystemQuery::Type;
 
     /// Use global context with fresh system profile settings
     auto system_context = Context::createCopy(getContext()->getGlobalContext());
@@ -903,6 +920,18 @@ AccessRightsElements InterpreterSystemQuery::getRequiredAccessForDDLOnCluster() 
 void InterpreterSystemQuery::extendQueryLogElemImpl(QueryLogElement & elem, const ASTPtr & /*ast*/, ContextPtr) const
 {
     elem.query_kind = "System";
+}
+
+void InterpreterSystemQuery::commitSystemQuery() const
+{
+    if (getContext()->getClientInfo().is_replicated_database_internal)
+    {
+        auto * ptr = typeid_cast<DatabaseReplicated *>(
+            DatabaseCatalog::instance().getDatabase(getContext()->getConfigRef().getString("default_database", "default")).get());
+        if (!ptr)
+            throw Exception("The default database is not Replicated engine", ErrorCodes::LOGICAL_ERROR);
+        ptr->commitDatabase(getContext());
+    }
 }
 
 }
