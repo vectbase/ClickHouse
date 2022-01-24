@@ -373,7 +373,7 @@ bool DistributedPlanner::scheduleStages(PlanResult & plan_result)
                                                     "SystemCurrentRoles", "SystemEnabledRoles", "SystemRowPolicies", "SystemPrivileges",
                                                     "SystemQuotas", "SystemQuotaLimits",
                                                     "SystemSettings", "SystemSettingsProfiles", "SystemSettingsProfileElements",
-                                                    "SystemZooKeeper",
+                                                    "SystemZooKeeper", "SystemProcesses",
                                                     "SystemNumbers", "SystemOne", "SystemZeros",
                                                     "SystemContributors", "SystemLicenses",
                                                     "SystemReplicatedMergeTreeSettings", "SystemMergeTreeSettings"};
