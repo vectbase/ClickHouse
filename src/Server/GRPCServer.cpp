@@ -46,6 +46,7 @@
 
 #include <base/logger_useful.h>
 
+using namespace std::chrono_literals;
 using GRPCService = clickhouse::grpc::ClickHouse::AsyncService;
 using GRPCQueryInfo = clickhouse::grpc::QueryInfo;
 using GRPCTicket = clickhouse::grpc::Ticket;
@@ -724,6 +725,8 @@ namespace
     class InnerMap
     {
     public:
+        InnerMap(String name): log(&Poco::Logger::get(name)) {}
+
         using Impl = std::unordered_map<String, Value>;
         auto get(const String & key_)
         {
@@ -734,7 +737,7 @@ namespace
             return std::pair<Value, bool>{it->second, true};
         }
 
-        auto insert(const String& key_, Value && value_)
+        auto insert(const String & key_, Value && value_)
         {
             std::lock_guard<std::mutex> lock(mutex);
             return container.emplace(key_, value_);
@@ -746,10 +749,26 @@ namespace
             return container.erase(key_);
         }
 
+        using Callback = bool(*)(const Value & it, const std::chrono::time_point<std::chrono::steady_clock> & now);
+        void eraseAll(Callback callback, const std::chrono::time_point<std::chrono::steady_clock> & now)
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            for (auto it = container.begin(); it != container.end();)
+            {
+                if (callback(it->second, now))
+                {
+                    LOG_DEBUG(log, "Clean entry for key {}", it->first);
+                    container.erase(it++);
+                }
+                else
+                    ++it;
+            }
+        }
 
     private:
         Impl container;
         std::mutex mutex;
+        Poco::Logger * log = nullptr;
     };
 
     class QueryInfoWrapper
@@ -808,7 +827,6 @@ namespace
         std::atomic<bool> finish{false};
         std::atomic<bool> cancel{false};
         std::chrono::seconds wait_timeout_seconds{600};
-        Exception exception;
     };
 
     void QueryInfoWrapper::notifyHeader(Block header_)
@@ -888,13 +906,29 @@ namespace
             cv_producer.notify_one();
     }
 
-    using QueryInfoMap = InnerMap<std::shared_ptr<QueryInfoWrapper>>;
+    using QueryInfoWrapperMap = InnerMap<std::shared_ptr<QueryInfoWrapper>>;
+
+    class ExceptionWrapper
+    {
+    public:
+        ExceptionWrapper(const Exception & exception_, const std::chrono::time_point<std::chrono::steady_clock> & timestamp_)
+        : exception(exception_), timestamp(timestamp_) {}
+        Exception exception;
+        std::chrono::time_point<std::chrono::steady_clock> timestamp;
+    };
+    using ExceptionWrapperMap = InnerMap<std::shared_ptr<ExceptionWrapper>>;
 
     /// Handles a connection after a responder is started (i.e. after getting a new call).
     class Call
     {
     public:
-        Call(CallType call_type_, std::unique_ptr<BaseResponder> responder_, IServer & iserver_, Poco::Logger * log_);
+        Call(
+            CallType call_type_,
+            std::unique_ptr<BaseResponder> responder_,
+            IServer & iserver_,
+            std::shared_ptr<QueryInfoWrapperMap> & query_info_map,
+            std::shared_ptr<ExceptionWrapperMap> & exception_map,
+            Poco::Logger * log_);
         ~Call();
 
         void start(const std::function<void(void)> & on_finish_call_callback);
@@ -944,6 +978,10 @@ namespace
         const CallType call_type;
         std::unique_ptr<BaseResponder> responder;
         IServer & iserver;
+        std::shared_ptr<QueryInfoWrapperMap> & query_info_map;
+        String query_info_key;
+        std::shared_ptr<QueryInfoWrapper> query_info_wrapper;
+        std::shared_ptr<ExceptionWrapperMap> & exception_map;
         Poco::Logger * log = nullptr;
 
         std::optional<Session> session;
@@ -966,10 +1004,6 @@ namespace
         std::shared_ptr<GRPCQueryInfo> query_info; /// We reuse the same messages multiple times.
         GRPCResult result;
         GRPCTicket ticket;
-
-        static std::unique_ptr<QueryInfoMap> query_info_map;
-        String query_info_key;
-        std::shared_ptr<QueryInfoWrapper> query_info_wrapper;
 
         bool initial_query_info_read = false;
         bool initial_ticket_read = false;
@@ -1005,10 +1039,19 @@ namespace
         ThreadFromGlobalPool call_thread;
     };
 
-    std::unique_ptr<QueryInfoMap> Call::query_info_map = std::make_unique<QueryInfoMap>();
-
-    Call::Call(CallType call_type_, std::unique_ptr<BaseResponder> responder_, IServer & iserver_, Poco::Logger * log_)
-        : call_type(call_type_), responder(std::move(responder_)), iserver(iserver_), log(log_)
+    Call::Call(
+        CallType call_type_,
+        std::unique_ptr<BaseResponder> responder_,
+        IServer & iserver_,
+        std::shared_ptr<QueryInfoWrapperMap> & query_info_map_,
+        std::shared_ptr<ExceptionWrapperMap> & exception_map_,
+        Poco::Logger * log_)
+        : call_type(call_type_)
+        , responder(std::move(responder_))
+        , iserver(iserver_)
+        , query_info_map(query_info_map_)
+        , exception_map(exception_map_)
+        , log(log_)
     {
     }
 
@@ -1339,6 +1382,13 @@ namespace
         }
         else
         {
+            const auto & check_exception_result = exception_map->get(query_info_key);
+            if (check_exception_result.second)
+            {
+                LOG_WARNING(log, "Query info key {} not found, and catch exception from producer.", query_info_key);
+                throw Exception(check_exception_result.first->exception);
+            }
+
             if (is_cancel) /// Plan fragment maybe done.
                 LOG_INFO(log, "Query info key {} to be cancelled does not exist, so ignore it.", query_info_key);
             else
@@ -1781,8 +1831,9 @@ namespace
         }
 
         /// Throw exception which is from producer.
-        if (query_info_wrapper->exception.code())
-            throw Exception(query_info_wrapper->exception);
+        const auto & check_exception_result = exception_map->get(query_info_key);
+        if (check_exception_result.second)
+            throw Exception(check_exception_result.first->exception);
 
         if (!query_info_wrapper->cancel)
         {
@@ -1863,7 +1914,10 @@ namespace
             if (query_info_wrapper)
             {
                 LOG_DEBUG(log, "{} producer has an exception", query_info_key);
-                query_info_wrapper->exception = exception;
+                auto const & now = std::chrono::steady_clock::now();
+                auto exception_wrapper = std::make_shared<ExceptionWrapper>(exception, now);
+                exception_map->insert(query_info_key, std::move(exception_wrapper));
+
                 cancelPlanFragment();
                 query_info_wrapper->notifyFinish();
             }
@@ -2265,12 +2319,19 @@ namespace
 class GRPCServer::Runner
 {
 public:
-    explicit Runner(GRPCServer & owner_) : owner(owner_) {}
+    explicit Runner(GRPCServer & owner_) : owner(owner_)
+    {
+        query_info_map = std::make_shared<QueryInfoWrapperMap>("QueryInfoWrapperMap");
+        exception_map = std::make_shared<ExceptionWrapperMap>("ExceptionWrapperMap");
+    }
 
     ~Runner()
     {
         if (queue_thread.joinable())
             queue_thread.join();
+
+        if (clean_thread.joinable())
+            clean_thread.join();
     }
 
     void start()
@@ -2290,6 +2351,19 @@ public:
             }
         };
         queue_thread = ThreadFromGlobalPool{runner_function};
+
+        auto cleanner_function = [this]
+        {
+            try
+            {
+                clean();
+            }
+            catch (...)
+            {
+                tryLogCurrentException("GRPCServer");
+            }
+        };
+        clean_thread = ThreadFromGlobalPool{cleanner_function};
     }
 
     void stop() { stopReceivingNewCalls(); }
@@ -2336,7 +2410,7 @@ private:
         {
             /// Connection established and the responder has been started.
             /// So we pass this responder to a Call and make another responder for next connection.
-            auto new_call = std::make_unique<Call>(call_type, std::move(responder), owner.iserver, owner.log);
+            auto new_call = std::make_unique<Call>(call_type, std::move(responder), owner.iserver, query_info_map, exception_map, owner.log);
             auto * new_call_ptr = new_call.get();
             current_calls[new_call_ptr] = std::move(new_call);
             new_call_ptr->start([this, new_call_ptr]() { onFinishCall(new_call_ptr); });
@@ -2387,6 +2461,29 @@ private:
         }
     }
 
+    static bool shouldClean(
+        const std::shared_ptr<ExceptionWrapper> & execption_wrapper,
+        const std::chrono::time_point<std::chrono::steady_clock> & now)
+    {
+        auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(now - execption_wrapper->timestamp);
+        if (elapsed > std::chrono::seconds(10s))
+            return true;
+        return false;
+    }
+
+    void clean()
+    {
+        using namespace std::chrono_literals;
+        setThreadName("GRPCServerCleaner");
+        while (!should_stop)
+        {
+            auto const & now = std::chrono::steady_clock::now();
+            exception_map->eraseAll(shouldClean, now);
+
+            std::this_thread::sleep_for(10s);
+        }
+    }
+
     GRPCServer & owner;
     ThreadFromGlobalPool queue_thread;
     std::vector<std::unique_ptr<BaseResponder>> responders_for_new_calls;
@@ -2394,6 +2491,10 @@ private:
     std::vector<std::unique_ptr<Call>> finished_calls;
     bool should_stop = false;
     mutable std::mutex mutex;
+
+    std::shared_ptr<QueryInfoWrapperMap> query_info_map;
+    std::shared_ptr<ExceptionWrapperMap> exception_map;
+    ThreadFromGlobalPool clean_thread;
 };
 
 
