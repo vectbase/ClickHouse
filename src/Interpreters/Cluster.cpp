@@ -768,6 +768,8 @@ void ClustersWatcher::startup()
     UInt16 grpc_port = context->getServerPort("grpc_port");
     String node_data = replica + ":" + toString(grpc_port);
 
+    /// When the server restarts, garbage node may remain. Clear if exists
+    zookeeper->tryRemove(node_path);
     Coordination::Requests requests;
     requests.emplace_back(zkutil::makeCreateRequest(node_path, node_data, zkutil::CreateMode::Ephemeral));
 
