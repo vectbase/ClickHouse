@@ -59,7 +59,9 @@ GRPCResult GRPCClient::executePlanFragment(const GRPCQueryInfo & query_info)
 void GRPCClient::prepareRead(const GRPCTicket & ticket_)
 {
     ticket = ticket_;
-    auto ch = grpc::CreateChannel(addr, grpc::InsecureChannelCredentials());
+    grpc::ChannelArguments arg;
+    arg.SetMaxReceiveMessageSize(-1);
+    auto ch = grpc::CreateCustomChannel(addr, grpc::InsecureChannelCredentials(), arg);
     std::shared_ptr<grpc::ClientContext> ctx = std::make_shared<grpc::ClientContext>();
     auto stub = clickhouse::grpc::ClickHouse::NewStub(ch);
     auto reader = stub->FetchPlanFragmentResult(ctx.get(), ticket);
