@@ -10,6 +10,7 @@
 #include <Processors/QueryPlan/AggregatingStep.h>
 #include <Processors/QueryPlan/MergingAggregatedStep.h>
 #include <Processors/QueryPlan/SortingStep.h>
+#include <Processors/QueryPlan/DistinctStep.h>
 #include <Processors/QueryPlan/LimitStep.h>
 #include <Processors/QueryPlan/CreatingSetsStep.h>
 #include <Processors/Formats/IOutputFormat.h>
@@ -34,18 +35,32 @@ DistributedPlanner::DistributedPlanner(QueryPlan & query_plan_, const ContextMut
 {
 }
 
-void DistributedPlanner::checkShuffle(QueryPlan::Node * current_node, QueryPlan::Node * child_node, CheckShuffleResult & result)
+void DistributedPlanner::checkShuffle(
+    QueryPlan::Node * current_node,
+    QueryPlan::Node * child_node,
+    CheckShuffleResult & result,
+    StageSeq & stage_seq)
 {
-    /// Cases:
-    /// 1. child node is aggregate step.
-    /// 2. current node is limit step, child node is sort step: no need shuffle.
-    /// 3. current node is not limit step, child node is sort step: need shuffle.
-    /// 4. child node is limit step: need shuffle.
+    /// Cases requiring special attention:
+    /// 1. Distinct:
+    ///    distinct => [(shuffle)] => distinct
+    ///    distinct => [(shuffle)] => distinct => limit
+    ///
+    /// 2. Limit(limit should be pushdown):
+    ///         => limit => [(shuffle) => limit]
+    ///    sort => limit => [(shuffle) => sort => limit]
+    ///
+    /// 3. Sort:
+    ///    distinct => sort => [(shuffle) => sort] => distinct
+    ///    distinct => sort => [(shuffle) => sort] => distinct => limit
+    ///
+    /// Note: The content in "[]" is added to the edge between two stages.
     result.current_union_step = dynamic_cast<UnionStep *>(current_node->step.get());
     if (result.current_union_step)
     {
         LOG_DEBUG(log, "Check shuffle: child node is UnionStep");
         result.is_shuffle = true;
+        stage_seq = StageSeq::STAGE1;
         return;
     }
 
@@ -57,33 +72,62 @@ void DistributedPlanner::checkShuffle(QueryPlan::Node * current_node, QueryPlan:
         /// Only broadcast right side.
         if (child_node == current_node->children[1])
             result.is_shuffle = true;
+        stage_seq = StageSeq::STAGE1;
         return;
     }
 
     result.child_aggregating_step = dynamic_cast<AggregatingStep *>(child_node->step.get());
     if (result.child_aggregating_step)
     {
+        /// From : AggregatingStep =>
+        /// To   : AggregatingStep(partial) [=> MergingAggregatedStep(final)] =>
         LOG_DEBUG(log, "Check shuffle: child node is AggregatingStep");
-        result.is_shuffle = true;
         result.grandchild_step = child_node->children.front()->step.get();
+        result.is_shuffle = true;
+        stage_seq = StageSeq::STAGE2;
         return;
     }
 
     result.child_sorting_step = dynamic_cast<SortingStep *>(child_node->step.get());
     if (result.child_sorting_step)
     {
+        /// From : SortingStep => Not (LimitStep) =>
+        /// To   : SortingStep(partial) [=> SortingStep(final)] => Not (LimitStep) =>
         LOG_DEBUG(log, "Check shuffle: child node is SortingStep");
         result.current_limit_step = dynamic_cast<LimitStep *>(current_node->step.get());
-    }
-    else
-    {
-        result.child_limit_step = dynamic_cast<LimitStep *>(child_node->step.get());
-        if (result.child_limit_step)
-            LOG_DEBUG(log, "Check shuffle: child node is LimitStep");
+        if (!result.current_limit_step)
+        {
+            result.is_shuffle = true;
+            stage_seq = StageSeq::STAGE2;
+        }
+        return;
     }
 
-    if ((result.child_sorting_step && !result.current_limit_step) || result.child_limit_step)
+    if ((result.child_distinct_step = dynamic_cast<DistinctStep *>(child_node->step.get())))
+    {
+        LOG_DEBUG(log, "Check shuffle: child node is DistinctStep");
+        result.current_distinct_step = dynamic_cast<DistinctStep *>(current_node->step.get());
+        if (result.current_distinct_step)
+        {
+            /// DistinctStep(partial) => (shuffle) => DistinctStep(final) =>
+            result.is_shuffle = true;
+            stage_seq = StageSeq::STAGE2;
+        }
+        return;
+    }
+
+    if ((result.child_limit_step = dynamic_cast<LimitStep *>(child_node->step.get())))
+    {
+        LOG_DEBUG(log, "Check shuffle: child node is LimitStep");
+        assert(child_node->children.size() == 1);
+        result.grandchild_sorting_step = dynamic_cast<SortingStep *>(child_node->children[0]->step.get());
+        /// If grandchild is SortingStep:
+        /// From : SortingStep => LimitStep =>
+        /// To   : SortingStep(partial) => LimitStep(partial) [=> SortingStep(final) => LimitStep(final)] =>
         result.is_shuffle = true;
+        stage_seq = StageSeq::STAGE2;
+        return;
+    }
 }
 
 void DistributedPlanner::buildStages()
@@ -133,6 +177,7 @@ void DistributedPlanner::buildStages()
     Stage * last_stage = nullptr;
     std::stack<Stage *> parent_stages;
     std::stack<QueryPlan::Node *> leaf_nodes;
+    StageSeq stage_seq = StageSeq::STAGE1;
 
     while (!stack.empty())
     {
@@ -142,7 +187,7 @@ void DistributedPlanner::buildStages()
         {
             /// This is shuffle, create a new stage for child_node.
             CheckShuffleResult result;
-            checkShuffle(frame.node, last_node, result);
+            checkShuffle(frame.node, last_node, result, stage_seq);
             if (result.is_shuffle)
             {
                 ++stage_id;
@@ -201,7 +246,7 @@ void DistributedPlanner::buildStages()
         if (next_child == frame.node->children.size()
             || (dynamic_cast<CreatingSetsStep *>(frame.node->step.get()) && frame.visited_children == 1))
         {
-            LOG_DEBUG(log, "Visit step: {}", frame.node->step->getName());
+            LOG_DEBUG(log, "[{}]Visit step: {}", getStageSeqName(stage_seq), frame.node->step->getName());
             last_node = frame.node;
             one_child_is_visited = true;
             stack.pop();
@@ -770,6 +815,7 @@ void DistributedPlanner::buildPlanFragment(PlanResult & plan_result)
     /// Used for locating the plan fragment.
     int stage_id = -1;
     QueryPlan::Node * last_node = nullptr;
+    StageSeq stage_seq = StageSeq::STAGE1;
 
     while (!stack.empty())
     {
@@ -790,7 +836,7 @@ void DistributedPlanner::buildPlanFragment(PlanResult & plan_result)
             }
 
             CheckShuffleResult result;
-            checkShuffle(frame.node, last_node, result);
+            checkShuffle(frame.node, last_node, result, stage_seq);
 
             /// This is a shuffle dependency between current node and the last visited child.
             if (result.is_shuffle)
@@ -867,23 +913,24 @@ void DistributedPlanner::buildPlanFragment(PlanResult & plan_result)
 
                         addStep(std::move(merging_aggregated), "Merge aggregated streams for distributed AGGREGATE", new_node);
                     }
-
                     /// If parent stage has order by, add SortingStep.
-                    if (result.child_sorting_step)
+                    else if (result.child_sorting_step)
                     {
                         auto merging_sorted = std::make_unique<SortingStep>(new_node->step->getOutputStream(), *result.child_sorting_step);
                         addStep(std::move(merging_sorted), "Merge sorted streams for distributed ORDER BY", new_node);
                     }
-
-                    /// If parent stage has limit, add LimitStep.
-                    if (result.child_limit_step)
+                    /// If parent stage has distinct, do nothing.
+                    else if (result.child_distinct_step)
                     {
-                        assert(last_node->children.size() == 1);
-                        const SortingStep * grandchild_sorting_step = dynamic_cast<SortingStep *>(last_node->children[0]->step.get());
-                        if  (grandchild_sorting_step)
+                        /// Do nothing
+                    }
+                    /// If parent stage has limit, add LimitStep.
+                    else if (result.child_limit_step)
+                    {
+                        if  (result.grandchild_sorting_step)
                         {
                             auto merging_sorted
-                                = std::make_unique<SortingStep>(new_node->step->getOutputStream(), *grandchild_sorting_step);
+                                = std::make_unique<SortingStep>(new_node->step->getOutputStream(), *result.grandchild_sorting_step);
                             addStep(std::move(merging_sorted), "Merge sorted streams for distributed ORDER BY", new_node);
                         }
 
@@ -911,7 +958,7 @@ void DistributedPlanner::buildPlanFragment(PlanResult & plan_result)
                             auto aggregating_step = std::make_unique<AggregatingStep>(*result.child_aggregating_step);
                             if (query_distributed_plan_info.empty_result_for_aggregation_by_empty_set)
                             {
-                                LOG_DEBUG(log, "Set (aggregating_step) param (empty_result_for_aggregation_by_empty_set) to {} for distributed query plan to keep compute and store nodes same",
+                                LOG_DEBUG(log, "Set empty_result_for_aggregation_by_empty_set to true for AggregatingStep",
                                           query_distributed_plan_info.empty_result_for_aggregation_by_empty_set);
                                 aggregating_step->setEmptyResultForAggregationByEmptySet(
                                     query_distributed_plan_info.empty_result_for_aggregation_by_empty_set);
@@ -925,7 +972,7 @@ void DistributedPlanner::buildPlanFragment(PlanResult & plan_result)
                             last_node = last_node->children[0];
                         }
                     }
-                        /// If limit step is pushed down, collect (limit + offset) rows.
+                    /// If limit step is pushed down, collect (limit + offset) rows.
                     else if (result.child_limit_step)
                         result.child_limit_step->resetLimitAndOffset();
 
@@ -943,7 +990,7 @@ void DistributedPlanner::buildPlanFragment(PlanResult & plan_result)
         if (next_child == frame.node->children.size()
             || (dynamic_cast<CreatingSetsStep *>(frame.node->step.get()) && frame.visited_children == 1))
         {
-            LOG_DEBUG(log, "Visit step: {}", frame.node->step->getName());
+            LOG_DEBUG(log, "[{}]Visit step: {}", getStageSeqName(stage_seq), frame.node->step->getName());
             last_node = frame.node;
             one_child_is_visited = true;
             stack.pop();
@@ -1041,7 +1088,7 @@ bool DistributedPlanner::buildDistributedPlan()
         plan_result.node_id = query_distributed_plan_info.node_id;
     }
 
-    LOG_DEBUG(log, "Result plan fragment:\n{}", debugLocalPlanFragment(plan_result));
+    LOG_DEBUG(log, "Local plan fragment:\n{}", debugLocalPlanFragment(plan_result));
 
     return true;
 }

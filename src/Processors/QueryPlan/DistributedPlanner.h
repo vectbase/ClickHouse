@@ -5,6 +5,14 @@
 namespace DB
 {
 
+class UnionStep;
+class JoinStep;
+class AggregatingStep;
+class SortingStep;
+class LimitStep;
+class DistinctStep;
+class DistributedSourceStep;
+
 class DistributedPlanner {
 public:
     DistributedPlanner(QueryPlan & query_plan_, const ContextMutablePtr & context);
@@ -12,6 +20,24 @@ public:
     bool buildDistributedPlan();
 
 private:
+    enum class StageSeq
+    {
+        STAGE0, /// Read data source
+        STAGE1, /// Partial processing
+        STAGE2  /// Final processing
+    };
+
+    String getStageSeqName(const StageSeq & stage_seq)
+    {
+        switch (stage_seq)
+        {
+            case StageSeq::STAGE0: return "STAGE0";
+            case StageSeq::STAGE1: return "STAGE1";
+            case StageSeq::STAGE2: return "STAGE2";
+        }
+        return "Unknown";
+    }
+
     struct Stage
     {
         int id; /// Current stage id.
@@ -51,11 +77,14 @@ private:
         JoinStep * current_join_step = nullptr;
         AggregatingStep * child_aggregating_step = nullptr;
         SortingStep * child_sorting_step = nullptr;
+        SortingStep * grandchild_sorting_step = nullptr;
+        DistinctStep * current_distinct_step = nullptr;
+        DistinctStep * child_distinct_step = nullptr;
         LimitStep * current_limit_step = nullptr;
         LimitStep * child_limit_step = nullptr;
         IQueryPlanStep * grandchild_step = nullptr;
     };
-    void checkShuffle(QueryPlan::Node * current_node, QueryPlan::Node * child_node, CheckShuffleResult & result);
+    void checkShuffle(QueryPlan::Node * current_node, QueryPlan::Node * child_node, CheckShuffleResult & result, StageSeq & stage_seq);
 
     struct PlanResult
     {

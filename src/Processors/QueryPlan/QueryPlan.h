@@ -28,12 +28,6 @@ using QueryPlanPtr = std::unique_ptr<QueryPlan>;
 
 class Pipe;
 
-class UnionStep;
-class JoinStep;
-class AggregatingStep;
-class SortingStep;
-class LimitStep;
-
 struct QueryPlanOptimizationSettings;
 struct BuildQueryPipelineSettings;
 
