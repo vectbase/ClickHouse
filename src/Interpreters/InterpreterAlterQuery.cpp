@@ -18,6 +18,7 @@
 #include <Storages/MutationCommands.h>
 #include <Storages/PartitionCommands.h>
 #include <Common/typeid_cast.h>
+#include <Common/ZooKeeper/DistributedRWLock.h>
 
 #include <boost/range/algorithm_ext/push_back.hpp>
 
@@ -37,7 +38,7 @@ namespace ErrorCodes
 }
 
 
-InterpreterAlterQuery::InterpreterAlterQuery(const ASTPtr & query_ptr_, ContextPtr context_) : WithContext(context_), query_ptr(query_ptr_)
+InterpreterAlterQuery::InterpreterAlterQuery(const ASTPtr & query_ptr_, ContextMutablePtr context_) : WithMutableContext(context_), query_ptr(query_ptr_)
 {
 }
 
@@ -70,6 +71,11 @@ BlockIO InterpreterAlterQuery::executeToTable(const ASTAlterQuery & alter)
         && !getContext()->getClientInfo().is_replicated_database_internal
         && !alter.isFetchAlter())
     {
+        if (table_id.database_name != "system")
+        {
+            getContext()->ddl_database_lock = zkutil::DistributedRWLock::tryLock(getContext()->getZooKeeper(), true, table_id.database_name);
+            getContext()->ddl_table_lock = zkutil::DistributedRWLock::tryLock(getContext()->getZooKeeper(), false, table_id.database_name, table_id.table_name);
+        }
         auto guard = DatabaseCatalog::instance().getDDLGuard(table_id.database_name, table_id.table_name);
         guard->releaseTableLock();
         return typeid_cast<DatabaseReplicated *>(database.get())->tryEnqueueReplicatedDDL(query_ptr, getContext());

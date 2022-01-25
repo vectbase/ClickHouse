@@ -16,6 +16,7 @@
 #include <Common/RemoteHostFilter.h>
 #include <Common/isLocalAddress.h>
 #include <base/types.h>
+#include <Common/ZooKeeper/DistributedRWLock.h>
 
 #include "config_core.h"
 
@@ -297,7 +298,9 @@ private:
 
 
 public:
-    DistributedDDLGuardPtr distributed_ddl_guard;
+    zkutil::DistributedRWLockPtr ddl_database_lock;
+    zkutil::DistributedRWLockPtr ddl_table_lock;
+
     struct QueryPlanFragmentInfo
     {
         String initial_query_id;

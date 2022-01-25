@@ -13,6 +13,7 @@
 #include <Databases/DatabaseReplicated.h>
 
 #include "config_core.h"
+#include <Common/ZooKeeper/DistributedRWLock.h>
 
 #if USE_MYSQL
 #   include <Databases/MySQL/DatabaseMaterializedMySQL.h>
@@ -81,6 +82,14 @@ BlockIO InterpreterDropQuery::executeToTable(ASTDropQuery & query)
 {
     DatabasePtr database;
     UUID table_to_wait_on = UUIDHelpers::Nil;
+    auto table_id = StorageID(query);
+    if (!getContext()->getClientInfo().is_replicated_database_internal && table_id.database_name != "system")
+    {
+        if (table_id.database_name.empty())
+            query.database = table_id.database_name = getContext()->getCurrentDatabase();
+        getContext()->ddl_database_lock = zkutil::DistributedRWLock::tryLock(getContext()->getZooKeeper(), true, table_id.database_name);
+        getContext()->ddl_table_lock = zkutil::DistributedRWLock::tryLock(getContext()->getZooKeeper(), false, table_id.database_name,table_id.table_name);
+    }
     auto res = executeToTableImpl(query, database, table_to_wait_on);
     if (query.no_delay)
         waitForTableToBeActuallyDroppedOrDetached(query, database, table_to_wait_on);
@@ -308,10 +317,7 @@ BlockIO InterpreterDropQuery::executeToDatabaseImpl(const ASTDropQuery & query, 
 
     if (!getContext()->getClientInfo().is_replicated_database_internal)
     {
-        getContext()->distributed_ddl_guard = DatabaseCatalog::instance().getDistributedDDLGuard(database_name);
-        if (!getContext()->distributed_ddl_guard->isCreated())
-            throw Exception(
-                "Database " + database_name + " is locked by another one, couldn't acquire lock", ErrorCodes::CANNOT_DROP_DATABASE);
+        getContext()->ddl_database_lock = zkutil::DistributedRWLock::tryLock(getContext()->getZooKeeper(), false, database_name);
     }
 
     database = tryGetDatabase(database_name, query.if_exists);

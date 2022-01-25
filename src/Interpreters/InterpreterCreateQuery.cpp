@@ -65,6 +65,7 @@
 
 #include <TableFunctions/TableFunctionFactory.h>
 #include <base/logger_useful.h>
+#include <Common/ZooKeeper/DistributedRWLock.h>
 
 
 namespace DB
@@ -106,10 +107,10 @@ BlockIO InterpreterCreateQuery::createDatabase(ASTCreateQuery & create)
     /// If the statement is not from ddl and not internal, that is from the user, the database requires distributed ddl guard
     if (!getContext()->getClientInfo().is_replicated_database_internal && !internal)
     {
-        getContext()->distributed_ddl_guard = DatabaseCatalog::instance().getDistributedDDLGuard(database_name);
-        if (!getContext()->distributed_ddl_guard->isCreated())
-            throw Exception(
-                "Database " + database_name + " is locked by another one, couldn't acquire lock", ErrorCodes::CANNOT_CREATE_DATABASE);
+        if (database_name != "system")
+        {
+            getContext()->ddl_database_lock = zkutil::DistributedRWLock::tryLock(getContext()->getZooKeeper(), false, database_name);
+        }
     }
 
     /// Database can be created before or it can be created concurrently in another thread, while we were waiting in DDLGuard
@@ -869,11 +870,19 @@ BlockIO InterpreterCreateQuery::createTable(ASTCreateQuery & create)
 {
     /// Temporary tables are created out of databases.
     if (create.temporary && !create.database.empty())
-        throw Exception("Temporary tables cannot be inside a database. You should not specify a database for a temporary table.",
+        throw Exception(
+            "Temporary tables cannot be inside a database. You should not specify a database for a temporary table.",
             ErrorCodes::BAD_DATABASE_FOR_TEMPORARY_TABLE);
 
     String current_database = getContext()->getCurrentDatabase();
     auto database_name = create.database.empty() ? current_database : create.database;
+
+    if (!getContext()->getClientInfo().is_replicated_database_internal && !internal && database_name != "system")
+    {
+        getContext()->ddl_database_lock = zkutil::DistributedRWLock::tryLock(getContext()->getZooKeeper(), true, database_name);
+        getContext()->ddl_table_lock = zkutil::DistributedRWLock::tryLock(getContext()->getZooKeeper(), false, database_name, create.table);
+    }
+
 
     // If this is a stub ATTACH query, read the query definition from the database
     if (create.attach && !create.storage && !create.columns_list)
@@ -1146,7 +1155,7 @@ BlockIO InterpreterCreateQuery::doCreateOrReplaceTable(ASTCreateQuery & create,
                                                        const InterpreterCreateQuery::TableProperties & properties)
 {
     /// Replicated database requires separate contexts for each DDL query
-    ContextPtr current_context = getContext();
+    ContextMutablePtr current_context = getContext();
     ContextMutablePtr create_context = Context::createCopy(current_context);
     create_context->setQueryContext(std::const_pointer_cast<Context>(current_context));
 
