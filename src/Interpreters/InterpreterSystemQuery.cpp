@@ -206,6 +206,10 @@ InterpreterSystemQuery::InterpreterSystemQuery(const ASTPtr & query_ptr_, Contex
 BlockIO InterpreterSystemQuery::execute()
 {
     auto & query = query_ptr->as<ASTSystemQuery &>();
+    if (query.database.empty())
+    {
+        query.database = getContext()->getCurrentDatabase();
+    }
 
     using Type = ASTSystemQuery::Type;
 
