@@ -200,6 +200,12 @@ public:
         ops.emplace_back(op);
     }
 
+    void removeLastOp()
+    {
+        if (ops.size() > 0)
+            ops.resize(ops.size()-1);
+    }
+
     void moveOpsTo(Coordination::Requests & other_ops)
     {
         if (isExecuted())
