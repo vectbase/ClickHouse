@@ -14,7 +14,7 @@ void IInterpreterUnionOrSelectQuery::extendQueryLogElemImpl(QueryLogElement & el
     elem.query_kind = "Select";
 }
 
-void IInterpreterUnionOrSelectQuery::rewriteDistributedQuery(bool is_subquery, [[maybe_unused]] size_t tables_count)
+void IInterpreterUnionOrSelectQuery::rewriteDistributedQuery(bool is_subquery, [[maybe_unused]] size_t tables_count, bool)
 {
     /// Reset these fields to not share them with parent query.
     if (is_subquery)

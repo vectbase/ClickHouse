@@ -897,6 +897,29 @@ const Block * Context::tryGetLocalScalar(const String & name) const
     return &it->second;
 }
 
+ExternalTableHolders Context::getExternalTableHolders() const
+{
+    assert(!isGlobalContext() || getApplicationType() == ApplicationType::LOCAL);
+    auto lock = getLock();
+
+    ExternalTableHolders res;
+    res.insert(external_tables_mapping.begin(), external_tables_mapping.end());
+
+    auto query_context_ptr = query_context.lock();
+    auto session_context_ptr = session_context.lock();
+    if (query_context_ptr && query_context_ptr.get() != this)
+    {
+        ExternalTableHolders buf = query_context_ptr->getExternalTableHolders();
+        res.insert(buf.begin(), buf.end());
+    }
+    else if (session_context_ptr && session_context_ptr.get() != this)
+    {
+        ExternalTableHolders buf = session_context_ptr->getExternalTableHolders();
+        res.insert(buf.begin(), buf.end());
+    }
+    return res;
+}
+
 Tables Context::getExternalTables() const
 {
     assert(!isGlobalContext() || getApplicationType() == ApplicationType::LOCAL);
@@ -920,7 +943,6 @@ Tables Context::getExternalTables() const
     }
     return res;
 }
-
 
 void Context::addExternalTable(const String & table_name, TemporaryTableHolder && temporary_table)
 {

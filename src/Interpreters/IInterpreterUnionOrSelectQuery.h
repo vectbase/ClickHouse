@@ -31,7 +31,7 @@ public:
         context->getClientInfo().distributed_query = queryToString(query_ptr);
     }
 
-    virtual void rewriteDistributedQuery(bool is_subquery, size_t tables_count = 0);
+    virtual void rewriteDistributedQuery(bool is_subquery, size_t tables_count = 0, bool need_log = false);
 
     virtual void buildQueryPlan(QueryPlan & query_plan) = 0;
     QueryPipelineBuilder buildQueryPipeline();

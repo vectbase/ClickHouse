@@ -169,7 +169,7 @@ InterpreterSelectWithUnionQuery::InterpreterSelectWithUnionQuery(
     options.ignore_quota |= all_nested_ignore_quota;
 }
 
-void InterpreterSelectWithUnionQuery::rewriteDistributedQuery(bool is_subquery, size_t)
+void InterpreterSelectWithUnionQuery::rewriteDistributedQuery(bool is_subquery, size_t, bool need_log)
 {
     IInterpreterUnionOrSelectQuery::rewriteDistributedQuery(is_subquery);
 
@@ -182,12 +182,13 @@ void InterpreterSelectWithUnionQuery::rewriteDistributedQuery(bool is_subquery, 
         distributed_ast->list_of_selects->children.at(i) = nested_interpreters[i]->getDistributedQueryPtr()->clone();
 
     rewritten_query = queryToString(distributed_query_ptr);
-    LOG_DEBUG(
-        log,
-        "[{}] Rewrite\n\"{}\"\n=>\n\"{}\"",
-        static_cast<void *>(context.get()),
-        context->getClientInfo().distributed_query,
-        rewritten_query);
+    if (need_log)
+        LOG_DEBUG(
+            log,
+            "[{}] Rewrite\n\"{}\"\n=>\n\"{}\"",
+            static_cast<void *>(context.get()),
+            context->getClientInfo().distributed_query,
+            rewritten_query);
     context->getClientInfo().distributed_query = std::move(rewritten_query);
 }
 
@@ -353,7 +354,7 @@ BlockIO InterpreterSelectWithUnionQuery::execute()
     QueryPlan query_plan;
     buildQueryPlan(query_plan);
 
-    rewriteDistributedQuery(false);
+    rewriteDistributedQuery(false, 0, true);
 
     query_plan.checkInitialized();
     query_plan.optimize(QueryPlanOptimizationSettings::fromContext(context));

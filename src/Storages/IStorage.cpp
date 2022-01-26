@@ -115,7 +115,7 @@ void IStorage::read(
     {
         auto header = (query_info.projection ? query_info.projection->desc->metadata : metadata_snapshot)
                           ->getSampleBlockForColumns(column_names, getVirtuals(), getStorageID());
-        InterpreterSelectQuery::addEmptySourceToQueryPlan(query_plan, header, query_info, context);
+        InterpreterSelectQuery::addEmptySourceToQueryPlan(query_plan, header, query_info, context, getName());
     }
     else
     {

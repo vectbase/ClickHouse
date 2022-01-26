@@ -26,6 +26,7 @@ namespace DB
 namespace ErrorCodes
 {
     extern const int LOGICAL_ERROR;
+    extern const int TABLE_ALREADY_EXISTS;
 }
 
 DistributedPlanner::DistributedPlanner(QueryPlan & query_plan_, const ContextMutablePtr & context_)
@@ -39,7 +40,8 @@ void DistributedPlanner::checkShuffle(
     QueryPlan::Node * current_node,
     QueryPlan::Node * child_node,
     CheckShuffleResult & result,
-    StageSeq & stage_seq)
+    StageSeq & stage_seq,
+    std::stack<QueryPlan::Node *> & leaf_nodes)
 {
     /// Cases requiring special attention:
     /// 1. Distinct:
@@ -71,7 +73,19 @@ void DistributedPlanner::checkShuffle(
         assert(current_node->children.size() == 2);
         /// Only broadcast right side.
         if (child_node == current_node->children[1])
-            result.is_shuffle = true;
+        {
+            if (child_node->num_parent_stages == 0 && child_node->num_leaf_nodes_in_stage == 1
+                && !leaf_nodes.empty() && isSinglePointDataSource(leaf_nodes.top()->step->getStepDescription()))
+            {
+                /// 1. Storage name is SystemNumbers: select ... from t1, numbers(10) n
+                /// 2. Storage name is Memory: select ... from t1 join (select number from numbers(1))
+                /// 3. Storage name is Memory: select ... from t1 join t2
+                LOG_DEBUG(log, "No need shuffle: right child's storage is {}", leaf_nodes.top()->step->getStepDescription());
+                result.is_shuffle = false;
+            }
+            else
+                result.is_shuffle = true;
+        }
         stage_seq = StageSeq::STAGE1;
         return;
     }
@@ -187,7 +201,7 @@ void DistributedPlanner::buildStages()
         {
             /// This is shuffle, create a new stage for child_node.
             CheckShuffleResult result;
-            checkShuffle(frame.node, last_node, result, stage_seq);
+            checkShuffle(frame.node, last_node, result, stage_seq, leaf_nodes);
             if (result.is_shuffle)
             {
                 ++stage_id;
@@ -246,7 +260,7 @@ void DistributedPlanner::buildStages()
         if (next_child == frame.node->children.size()
             || (dynamic_cast<CreatingSetsStep *>(frame.node->step.get()) && frame.visited_children == 1))
         {
-            LOG_DEBUG(log, "[{}]Visit step: {}", getStageSeqName(stage_seq), frame.node->step->getName());
+            LOG_DEBUG(log, "[{}]Visit step: {}({})", getStageSeqName(stage_seq), frame.node->step->getName(), frame.node->step->getStepDescription());
             last_node = frame.node;
             one_child_is_visited = true;
             stack.pop();
@@ -264,10 +278,23 @@ void DistributedPlanner::buildStages()
     /// Create a virtual node, used in iterating stages.
     parent_stages.push(last_stage);
     auto step = std::make_unique<DistributedSourceStep>(stage_id, last_stage->id, context);
-    query_plan.nodes.emplace_back(QueryPlan::Node{.step = std::move(step), .children = {last_node}, .num_parent_stages = 1});
+    query_plan.nodes.emplace_back(QueryPlan::Node{
+        .step = std::move(step),
+        .children = {last_node},
+        .num_parent_stages = 1,
+        .interpreter_params = query_plan.root->interpreter_params});
     query_plan.root = &query_plan.nodes.back();
+    LOG_DEBUG(
+        log,
+        "Set context({} <= {}) to {}",
+        query_plan.root->step->getName(),
+        last_node->step->getName(),
+        static_cast<const void *>(query_plan.root->interpreter_params->context.get()));
+
+    /// Maintain leaf nodes.
     leaf_nodes.push(query_plan.root);
     query_plan.root->num_leaf_nodes_in_stage = 1;
+
     result_stage = createStage(stage_id, parent_stages, query_plan.root, leaf_nodes);
 
     debugStages();
@@ -328,7 +355,25 @@ void DistributedPlanner::debugStages()
     LOG_DEBUG(log, "===> Print Stages:\n{}", buf.str());
 }
 
-bool DistributedPlanner::scheduleStages(PlanResult & plan_result)
+bool DistributedPlanner::isSinglePointDataSource(const String & name)
+{
+    /// They are ReadFromStorageStep with storage name as follows.
+    static std::unordered_set<String> single_point_storages{"SystemClusters", "SystemDatabases", "SystemTables", "SystemColumns",
+                                                        "SystemDictionaries", "SystemDataSkippingIndices",
+                                                        "SystemFunctions", "SystemFormats", "SystemTableEngines",
+                                                        "SystemUsers", "SystemRoles", "SystemGrants", "SystemRoleGrants",
+                                                        "SystemCurrentRoles", "SystemEnabledRoles", "SystemRowPolicies", "SystemPrivileges",
+                                                        "SystemQuotas", "SystemQuotaLimits",
+                                                        "SystemSettings", "SystemSettingsProfiles", "SystemSettingsProfileElements",
+                                                        "SystemZooKeeper", "SystemProcesses",
+                                                        "SystemNumbers", "SystemOne", "SystemZeros",
+                                                        "SystemContributors", "SystemLicenses",
+                                                        "SystemReplicatedMergeTreeSettings", "SystemMergeTreeSettings",
+                                                        "Memory"};
+    return single_point_storages.contains(name);
+}
+
+void DistributedPlanner::scheduleStages(PlanResult & plan_result)
 {
     LOG_DEBUG(log, "===> Schedule stages.");
     /// Use current query id to build the plan fragment id.
@@ -366,21 +411,8 @@ bool DistributedPlanner::scheduleStages(PlanResult & plan_result)
     if (store_replicas.empty() || compute_replicas.empty())
         throw Exception(ErrorCodes::LOGICAL_ERROR, "No enough store workers({}) or compute workers({}).", store_replicas.size(), compute_replicas.size());
 
-    static std::unordered_set<String> system_tables{"SystemClusters", "SystemDatabases", "SystemTables", "SystemColumns",
-                                                    "SystemDictionaries", "SystemDataSkippingIndices",
-                                                    "SystemFunctions", "SystemFormats", "SystemTableEngines",
-                                                    "SystemUsers", "SystemRoles", "SystemGrants", "SystemRoleGrants",
-                                                    "SystemCurrentRoles", "SystemEnabledRoles", "SystemRowPolicies", "SystemPrivileges",
-                                                    "SystemQuotas", "SystemQuotaLimits",
-                                                    "SystemSettings", "SystemSettingsProfiles", "SystemSettingsProfileElements",
-                                                    "SystemZooKeeper", "SystemProcesses",
-                                                    "SystemNumbers", "SystemOne", "SystemZeros",
-                                                    "SystemContributors", "SystemLicenses",
-                                                    "SystemReplicatedMergeTreeSettings", "SystemMergeTreeSettings"};
-
     static std::unordered_set<String> special_storages{"HDFS", "S3", "MySQL", "Memory"};
 
-    bool is_result_stage_moved_forward = false;
     auto fillStage = [&](Stage * stage)
     {
         /// Leaf stage.
@@ -393,11 +425,11 @@ bool DistributedPlanner::scheduleStages(PlanResult & plan_result)
                 if (leaf_node->children.empty())
                 {
                     /// It's system table or special storage.
-                    if (system_tables.contains(leaf_node->step->getStepDescription()) ||
+                    if (isSinglePointDataSource(leaf_node->step->getStepDescription()) ||
                         special_storages.contains(leaf_node->step->getStepDescription()))
                     {
                     }
-                        /// It's StorageValues.
+                    /// It's StorageValues.
                     else if (leaf_node->step->getStepDescription() == "Values")
                     {
                         /// StorageValues is used in:
@@ -454,7 +486,7 @@ bool DistributedPlanner::scheduleStages(PlanResult & plan_result)
                     result_stage = parent;
                     query_plan.root = parent->root_node;
                     stages.pop_back();
-                    is_result_stage_moved_forward = true;
+                    plan_result.is_result_stage_moved_forward = true;
                     return;
                 }
             }
@@ -530,7 +562,7 @@ bool DistributedPlanner::scheduleStages(PlanResult & plan_result)
         if (&stage == result_stage)
         {
             assert(!result_stage->parents.empty());
-            if (is_result_stage_moved_forward)
+            if (plan_result.is_result_stage_moved_forward)
             {
                 Context::QueryPlanFragmentInfo query_plan_fragment_info{
                     .initial_query_id = initial_query_id,
@@ -543,6 +575,36 @@ bool DistributedPlanner::scheduleStages(PlanResult & plan_result)
                 }
                 query_plan_fragment_info.sinks = stage.sinks;
                 context->setQueryPlanFragmentInfo(query_plan_fragment_info);
+
+                /// Add external tables to current context.
+                assert(stage.root_node->interpreter_params);
+                const auto & external_table_holders = stage.root_node->interpreter_params->context->getExternalTableHolders();
+                LOG_DEBUG(
+                    log,
+                    "Add {} external tables using context {} from local.",
+                    external_table_holders.size(),
+                    static_cast<const void *>(stage.root_node->interpreter_params->context.get()));
+                for (const auto & table : external_table_holders)
+                {
+                    auto table_holder = table.second;
+                    String table_name = table.first;
+
+                    LOG_DEBUG(
+                        log,
+                        "Add external table {} with {} ({}) from local.",
+                        table_name,
+                        table_holder->getTable()->getStorageID().getFullNameNotQuoted(),
+                        table_holder->getTable()->getName());
+                    try
+                    {
+                        context->addExternalTable(table_name, std::move(*table_holder));
+                    }
+                    catch (Exception & e)
+                    {
+                        if (e.code() != ErrorCodes::TABLE_ALREADY_EXISTS)
+                            throw;
+                    }
+                }
             }
             else
             {
@@ -783,8 +845,6 @@ bool DistributedPlanner::scheduleStages(PlanResult & plan_result)
                 : "Exception: (code " + toString(result.exception().code()) + ") " + result.exception().display_text());
         }
     }
-
-    return is_result_stage_moved_forward;
 }
 
 void DistributedPlanner::buildPlanFragment(PlanResult & plan_result)
@@ -793,13 +853,34 @@ void DistributedPlanner::buildPlanFragment(PlanResult & plan_result)
     int my_stage_id = query_distributed_plan_info.stage_id;
     LOG_DEBUG(
         log,
-        "===> Build plan fragment: {} stage {}, has {} parent stages.",
+        "===> [{}]Build plan fragment: {} stage {}({} parent stages).",
+        plan_result.is_result_stage_moved_forward ? "From Local" : "From Remote",
         (result_stage ? (my_stage_id == result_stage->id ? "result": "non-result") : "non-result"),
         my_stage_id,
         query_distributed_plan_info.parent_sources.size());
 
+    /// Clean states that may be set in building stages.
+    if (plan_result.is_result_stage_moved_forward)
+    {
+        for (auto & node : query_plan.nodes)
+        {
+            node.num_parent_stages = 0;
+            node.num_leaf_nodes_in_stage = 0;
+        }
+    }
+
     /// Get my replica grpc address
     String my_replica = context->getMacros()->getValue("replica") + ":" + toString(context->getServerPort("grpc_port"));
+
+    auto popLeafNodes = [](QueryPlan::Node * root_node, std::stack<QueryPlan::Node *> & leaf_nodes) {
+        if (root_node)
+        {
+            for (int i = 0; !leaf_nodes.empty() && i < root_node->num_leaf_nodes_in_stage; ++i)
+            {
+                leaf_nodes.pop();
+            }
+        }
+    };
 
     struct Frame
     {
@@ -811,10 +892,12 @@ void DistributedPlanner::buildPlanFragment(PlanResult & plan_result)
     std::stack<Frame> stack;
     stack.push(Frame{.node = query_plan.root});
     bool one_child_is_visited = false;
+    std::stack<QueryPlan::Node *> leaf_nodes;
 
     /// Used for locating the plan fragment.
     int stage_id = -1;
     QueryPlan::Node * last_node = nullptr;
+    QueryPlan::Node * leaf_node = nullptr;
     StageSeq stage_seq = StageSeq::STAGE1;
 
     while (!stack.empty())
@@ -836,12 +919,13 @@ void DistributedPlanner::buildPlanFragment(PlanResult & plan_result)
             }
 
             CheckShuffleResult result;
-            checkShuffle(frame.node, last_node, result, stage_seq);
+            checkShuffle(frame.node, last_node, result, stage_seq, leaf_nodes);
 
             /// This is a shuffle dependency between current node and the last visited child.
             if (result.is_shuffle)
             {
                 ++stage_id;
+                popLeafNodes(last_node, leaf_nodes);
 
                 /// This is one of my parent stages.
                 const auto & it = query_distributed_plan_info.parent_sources.find(stage_id);
@@ -980,17 +1064,36 @@ void DistributedPlanner::buildPlanFragment(PlanResult & plan_result)
 
                     return;
                 }
+
+                /// Set the number of parent stages and leaf nodes.
+                frame.node->num_parent_stages += 1;
+                leaf_node = frame.node;
+                leaf_nodes.push(leaf_node);
+                frame.node->num_leaf_nodes_in_stage += 1;
+            }
+            else
+            {
+                frame.node->num_parent_stages += last_node->num_parent_stages;
+                frame.node->num_leaf_nodes_in_stage += last_node->num_leaf_nodes_in_stage;
             }
 
             ++frame.visited_children;
             one_child_is_visited = false;
         }
 
+        /// Set the number of leaf nodes.
+        if (frame.node->children.empty())
+        {
+            leaf_node = frame.node;
+            leaf_nodes.push(leaf_node);
+            frame.node->num_leaf_nodes_in_stage = 1;
+        }
+
         size_t next_child = frame.visited_children;
         if (next_child == frame.node->children.size()
             || (dynamic_cast<CreatingSetsStep *>(frame.node->step.get()) && frame.visited_children == 1))
         {
-            LOG_DEBUG(log, "[{}]Visit step: {}", getStageSeqName(stage_seq), frame.node->step->getName());
+            LOG_DEBUG(log, "[{}]Visit step: {}({})", getStageSeqName(stage_seq), frame.node->step->getName(), frame.node->step->getStepDescription());
             last_node = frame.node;
             one_child_is_visited = true;
             stack.pop();
@@ -1050,8 +1153,8 @@ bool DistributedPlanner::buildDistributedPlan()
     {
         buildStages();
 
-        bool is_result_stage_moved_forward = scheduleStages(plan_result);
-        if (is_result_stage_moved_forward)
+        scheduleStages(plan_result);
+        if (plan_result.is_result_stage_moved_forward)
             buildPlanFragment(plan_result);
 
         if (!creating_set_plans.empty() && !dynamic_cast<CreatingSetsStep *>(query_plan.root->step.get()))
@@ -1061,7 +1164,7 @@ bool DistributedPlanner::buildDistributedPlan()
             result_stage->root_node = query_plan.root;
         }
 
-        if (!is_result_stage_moved_forward)
+        if (!plan_result.is_result_stage_moved_forward)
         {
             plan_result.initial_query_id = context->getClientInfo().current_query_id;
             plan_result.stage_id = result_stage->id;

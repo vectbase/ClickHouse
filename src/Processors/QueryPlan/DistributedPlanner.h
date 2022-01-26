@@ -1,6 +1,7 @@
 #pragma once
 
 #include <Processors/QueryPlan/QueryPlan.h>
+#include <stack>
 
 namespace DB
 {
@@ -84,7 +85,12 @@ private:
         LimitStep * child_limit_step = nullptr;
         IQueryPlanStep * grandchild_step = nullptr;
     };
-    void checkShuffle(QueryPlan::Node * current_node, QueryPlan::Node * child_node, CheckShuffleResult & result, StageSeq & stage_seq);
+    void checkShuffle(
+        QueryPlan::Node * current_node,
+        QueryPlan::Node * child_node,
+        CheckShuffleResult & result,
+        StageSeq & stage_seq,
+        std::stack<QueryPlan::Node *> & leaf_nodes);
 
     struct PlanResult
     {
@@ -92,14 +98,16 @@ private:
         int stage_id;
         String node_id;
         std::vector<QueryPlan::Node *> distributed_source_nodes;
+        bool is_result_stage_moved_forward = false;
     };
     String debugLocalPlanFragment(PlanResult & plan_result);
     String debugRemotePlanFragment(const String & query, const String & receiver, const String & query_id, const Stage * stage);
 
+    bool isSinglePointDataSource(const String & name);
     void buildStages();
     void debugStages();
-    /// Return true if result stage is moved forward.
-    bool scheduleStages(PlanResult & plan_result);
+
+    void scheduleStages(PlanResult & plan_result);
     void buildPlanFragment(PlanResult & plan_result);
     void uniteCreatingSetSteps(std::vector<std::unique_ptr<QueryPlan>> & creating_set_plans);
 

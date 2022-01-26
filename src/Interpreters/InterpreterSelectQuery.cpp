@@ -582,7 +582,7 @@ InterpreterSelectQuery::InterpreterSelectQuery(
     sanitizeBlock(result_header, true);
 }
 
-void InterpreterSelectQuery::rewriteDistributedQuery(bool is_subquery, size_t tables_count)
+void InterpreterSelectQuery::rewriteDistributedQuery(bool is_subquery, size_t tables_count, bool need_log)
 {
     IInterpreterUnionOrSelectQuery::rewriteDistributedQuery(is_subquery);
 
@@ -593,12 +593,13 @@ void InterpreterSelectQuery::rewriteDistributedQuery(bool is_subquery, size_t ta
     }
 
     String maybe_rewritten_query = queryToString(distributed_query_ptr);
-    LOG_DEBUG(
-        log,
-        "[{}] Rewrite\n\"{}\"\n=>\n\"{}\"",
-        static_cast<void *>(context.get()),
-        context->getClientInfo().distributed_query,
-        maybe_rewritten_query);
+    if (need_log)
+        LOG_DEBUG(
+            log,
+            "[{}] Rewrite\n\"{}\"\n=>\n\"{}\"",
+            static_cast<void *>(context.get()),
+            context->getClientInfo().distributed_query,
+            maybe_rewritten_query);
     context->getClientInfo().distributed_query = std::move(maybe_rewritten_query);
 }
 
@@ -1519,7 +1520,11 @@ static void executeMergeAggregatedImpl(
 }
 
 void InterpreterSelectQuery::addEmptySourceToQueryPlan(
-    QueryPlan & query_plan, const Block & source_header, const SelectQueryInfo & query_info, ContextPtr context_)
+    QueryPlan & query_plan,
+    const Block & source_header,
+    const SelectQueryInfo & query_info,
+    ContextPtr context_,
+    const String & storage_name)
 {
     Pipe pipe(std::make_shared<NullSource>(source_header));
 
@@ -1556,7 +1561,7 @@ void InterpreterSelectQuery::addEmptySourceToQueryPlan(
     }
 
     auto read_from_pipe = std::make_unique<ReadFromPreparedSource>(std::move(pipe));
-    read_from_pipe->setStepDescription("Read from NullSource");
+    read_from_pipe->setStepDescription(storage_name.empty() ? "Read from NullSource" : storage_name);
     InterpreterParamsPtr interpreter_params = std::make_shared<InterpreterParams>(context_, query_info.query->as<ASTSelectQuery &>());
     query_plan.addStep(std::move(read_from_pipe), std::move(interpreter_params));
 

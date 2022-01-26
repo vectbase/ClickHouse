@@ -233,6 +233,20 @@ private:
             && (table_elem.table_join->as<ASTTableJoin &>().locality == ASTTableJoin::Locality::Global
                 || data.getContext()->getSettingsRef().prefer_global_in_and_join))
         {
+            if (const auto * ast_table_expr = table_elem.table_expression->as<ASTTableExpression>())
+            {
+                if (ast_table_expr->table_function)
+                {
+                    /// For example: select * from demo, numbers(10) n.
+                    /// TablesInSelectQueryElement (children 2)
+                    ///  TableJoin
+                    ///  TableExpression (children 1)
+                    ///   Function numbers (alias n) (children 1) # here is table_function
+                    ///    ExpressionList (children 1)
+                    ///     Literal UInt64_10
+                    return;
+                }
+            }
             data.addExternalStorage(table_elem.table_expression, true);
             data.has_global_subqueries = true;
         }
