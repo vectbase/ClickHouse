@@ -60,7 +60,7 @@ void DistributedPlanner::checkShuffle(
     result.current_union_step = dynamic_cast<UnionStep *>(current_node->step.get());
     if (result.current_union_step)
     {
-        LOG_DEBUG(log, "Check shuffle: child node is UnionStep");
+        LOG_DEBUG(log, "[{}]Check shuffle: child node is UnionStep", getStageSeqName(stage_seq));
         result.is_shuffle = true;
         stage_seq = StageSeq::STAGE1;
         return;
@@ -69,7 +69,7 @@ void DistributedPlanner::checkShuffle(
     result.current_join_step = dynamic_cast<JoinStep *>(current_node->step.get());
     if (result.current_join_step)
     {
-        LOG_DEBUG(log, "Check shuffle: current node is JoinStep(0x{})", static_cast<void*>(result.current_join_step));
+        LOG_DEBUG(log, "[{}]Check shuffle: current node is JoinStep(0x{})", getStageSeqName(stage_seq), static_cast<void*>(result.current_join_step));
         assert(current_node->children.size() == 2);
         /// Only broadcast right side.
         if (child_node == current_node->children[1])
@@ -95,7 +95,7 @@ void DistributedPlanner::checkShuffle(
     {
         /// From : AggregatingStep =>
         /// To   : AggregatingStep(partial) [=> MergingAggregatedStep(final)] =>
-        LOG_DEBUG(log, "Check shuffle: child node is AggregatingStep");
+        LOG_DEBUG(log, "[{}]Check shuffle: child node is AggregatingStep", getStageSeqName(stage_seq));
         result.grandchild_step = child_node->children.front()->step.get();
         result.is_shuffle = true;
         stage_seq = StageSeq::STAGE2;
@@ -107,9 +107,12 @@ void DistributedPlanner::checkShuffle(
     {
         /// From : SortingStep => Not (LimitStep) =>
         /// To   : SortingStep(partial) [=> SortingStep(final)] => Not (LimitStep) =>
-        LOG_DEBUG(log, "Check shuffle: child node is SortingStep");
-        result.current_limit_step = dynamic_cast<LimitStep *>(current_node->step.get());
-        if (!result.current_limit_step)
+        LOG_DEBUG(log, "[{}]Check shuffle: child node is SortingStep", getStageSeqName(stage_seq));
+        if (stage_seq == StageSeq::STAGE2)
+        {
+            result.is_shuffle = false;
+        }
+        else if (!(result.current_limit_step = dynamic_cast<LimitStep *>(current_node->step.get())))
         {
             result.is_shuffle = true;
             stage_seq = StageSeq::STAGE2;
@@ -119,7 +122,7 @@ void DistributedPlanner::checkShuffle(
 
     if ((result.child_distinct_step = dynamic_cast<DistinctStep *>(child_node->step.get())))
     {
-        LOG_DEBUG(log, "Check shuffle: child node is DistinctStep");
+        LOG_DEBUG(log, "[{}]Check shuffle: child node is DistinctStep", getStageSeqName(stage_seq));
         result.current_distinct_step = dynamic_cast<DistinctStep *>(current_node->step.get());
         if (result.current_distinct_step)
         {
@@ -132,14 +135,21 @@ void DistributedPlanner::checkShuffle(
 
     if ((result.child_limit_step = dynamic_cast<LimitStep *>(child_node->step.get())))
     {
-        LOG_DEBUG(log, "Check shuffle: child node is LimitStep");
-        assert(child_node->children.size() == 1);
-        result.grandchild_sorting_step = dynamic_cast<SortingStep *>(child_node->children[0]->step.get());
-        /// If grandchild is SortingStep:
-        /// From : SortingStep => LimitStep =>
-        /// To   : SortingStep(partial) => LimitStep(partial) [=> SortingStep(final) => LimitStep(final)] =>
-        result.is_shuffle = true;
-        stage_seq = StageSeq::STAGE2;
+        LOG_DEBUG(log, "[{}]Check shuffle: child node is LimitStep", getStageSeqName(stage_seq));
+        if (stage_seq == StageSeq::STAGE2)
+        {
+            result.is_shuffle = false;
+        }
+        else
+        {
+            assert(child_node->children.size() == 1);
+            result.grandchild_sorting_step = dynamic_cast<SortingStep *>(child_node->children[0]->step.get());
+            /// If grandchild is SortingStep:
+            /// From : SortingStep => LimitStep =>
+            /// To   : SortingStep(partial) => LimitStep(partial) [=> SortingStep(final) => LimitStep(final)] =>
+            result.is_shuffle = true;
+            stage_seq = StageSeq::STAGE2;
+        }
         return;
     }
 }
