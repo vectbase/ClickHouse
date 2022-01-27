@@ -23,6 +23,10 @@ void IInterpreterUnionOrSelectQuery::rewriteDistributedQuery(bool is_subquery, [
         getContext()->getClientInfo().query_kind = ClientInfo::QueryKind::INITIAL_QUERY;
         getContext()->getClientInfo().current_query_id = getContext()->generateQueryId();
     }
+
+    /// Set current query id if empty, because distributed plan needs it as initial query id.
+    if (getContext()->getClientInfo().current_query_id.empty())
+        getContext()->getClientInfo().current_query_id = getContext()->generateQueryId();
 }
 
 QueryPipelineBuilder IInterpreterUnionOrSelectQuery::buildQueryPipeline()
