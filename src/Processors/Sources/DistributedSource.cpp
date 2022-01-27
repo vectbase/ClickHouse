@@ -134,15 +134,15 @@ Chunk DistributedExtremesSource::generate()
 }
 
 Pipe createDistributedSourcePipe(
-    DistributedSourceExecutorPtr executor, bool add_aggregation_info, bool /*add_totals*/, bool /*add_extremes*/, bool async_read)
+    DistributedSourceExecutorPtr executor, bool add_aggregation_info, bool add_totals, bool add_extremes, bool async_read)
 {
     Pipe pipe(std::make_shared<DistributedSource>(executor, add_aggregation_info, async_read));
 
-//    if (add_totals)
-//        pipe.addTotalsSource(std::make_shared<DistributedTotalsSource>(executor));
-//
-//    if (add_extremes)
-//        pipe.addExtremesSource(std::make_shared<DistributedExtremesSource>(executor));
+    if (add_totals)
+        pipe.addTotalsSource(std::make_shared<DistributedTotalsSource>(executor));
+
+    if (add_extremes)
+        pipe.addExtremesSource(std::make_shared<DistributedExtremesSource>(executor));
 
     return pipe;
 }

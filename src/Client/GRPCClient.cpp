@@ -28,10 +28,10 @@ namespace ErrorCodes
     extern const int GRPC_CANCEL_ERROR;
 }
 
-GRPCClient::GRPCClient(const String & addr_)
+GRPCClient::GRPCClient(const String & addr_, const String & description_)
 {
     addr = addr_;
-    log = &Poco::Logger::get("GRPCClient(" + addr + ")");
+    log = &Poco::Logger::get("GRPCClient(" + description_ + ")");
 }
 
 GRPCResult GRPCClient::executePlanFragment(const GRPCQueryInfo & query_info)
@@ -72,7 +72,6 @@ GRPCClient::MessageType GRPCClient::read(Block & block)
 {
     assert(inner_context);
 
-    LOG_DEBUG(log, "Start reading result from {}.", addr);
     GRPCResult result;
     if (inner_context->reader->Read(&result))
     {
@@ -80,8 +79,7 @@ GRPCClient::MessageType GRPCClient::read(Block & block)
         {
             LOG_ERROR(
                 log,
-                "Read from {} failed, exception.code: {}, exception.text: {}.",
-                addr,
+                "Read failed, exception.code: {}, exception.text: {}.",
                 result.exception().code(),
                 result.exception().display_text());
             throw Exception(result.exception().display_text(), result.exception().code(), true);
@@ -93,7 +91,6 @@ GRPCClient::MessageType GRPCClient::read(Block & block)
             ReadBufferFromString b(result.totals());
             NativeReader reader(b, 0);
             block = reader.read();
-            LOG_DEBUG(log, "Read totals from {} success, result size: {}, block rows: {}.", addr, result.output().size(), block.rows());
             return MessageType::Totals;
         }
 
@@ -102,7 +99,6 @@ GRPCClient::MessageType GRPCClient::read(Block & block)
             ReadBufferFromString b(result.extremes());
             NativeReader reader(b, 0);
             block = reader.read();
-            LOG_DEBUG(log, "Read extremes from {} success, result size: {}, block rows: {}.", addr, result.output().size(), block.rows());
             return MessageType::Extremes;
         }
 
@@ -111,7 +107,6 @@ GRPCClient::MessageType GRPCClient::read(Block & block)
             ReadBufferFromString b(result.output());
             NativeReader reader(b, 0);
             block = reader.read();
-            LOG_DEBUG(log, "Read data from {} success, result size: {}, block rows: {}.", addr, result.output().size(), block.rows());
         }
         return MessageType::Data;
     }
@@ -133,7 +128,7 @@ void GRPCClient::cancel()
     if (status.ok())
     {
         if (result.cancelled())
-            LOG_INFO(log, "Cancel success from {}, plan fragment id: {}", addr, plan_fragment_id);
+            LOG_DEBUG(log, "Cancel success, plan fragment id: {}", plan_fragment_id);
         else
         {
             throw Exception("Cancel failed from " + addr + ", plan fragment id: " + plan_fragment_id + ", code: " + toString(result.exception().code()) + ", " + result.exception().display_text(), ErrorCodes::GRPC_CANCEL_ERROR, true);
@@ -142,7 +137,7 @@ void GRPCClient::cancel()
     else
     {
         LOG_ERROR(
-            log, "Cancel failed from {}, code: {}, plan fragment id: {}.", addr, status.error_code(), plan_fragment_id);
+            log, "Cancel failed, code: {}, plan fragment id: {}.", status.error_code(), plan_fragment_id);
         throw Exception(status.error_message() + ", " + result.exception().display_text(), ErrorCodes::GRPC_CANCEL_ERROR, true);
     }
 }

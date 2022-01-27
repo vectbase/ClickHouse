@@ -1727,7 +1727,7 @@ namespace
             query_info_wrapper->notifyHeader(io.pipeline.getHeader());
 
             /// Pull block from pipeline.
-            auto executor = std::make_shared<PullingAsyncPipelineExecutor>(io.pipeline);
+            auto executor = std::make_shared<PullingPipelineExecutor>(io.pipeline);
             auto check_for_cancel = [this, &executor] {
                 if (query_info_wrapper->cancel)
                 {
@@ -1743,7 +1743,7 @@ namespace
             Block block;
             while (check_for_cancel())
             {
-                if (!executor->pull(block, interactive_delay / 1000))
+                if (!executor->pull(block))
                     break;
 
                 if (!check_for_cancel())
@@ -1770,6 +1770,7 @@ namespace
                 query_info_wrapper->totals = executor->getTotalsBlock();
                 query_info_wrapper->extremes = executor->getExtremesBlock();
                 query_info_wrapper->profile_info = executor->getProfileInfo();
+                LOG_DEBUG(log, "{} produce totals {}, extremes {}.", query_info_key, query_info_wrapper->totals.rows(), query_info_wrapper->extremes.rows());
             }
             query_info_wrapper->notifyFinish();
         }
@@ -1837,6 +1838,7 @@ namespace
 
         if (!query_info_wrapper->cancel)
         {
+            LOG_DEBUG(log, "{}|{} consume totals {}, extremes {}.", query_info_key, ticket.node_id(), query_info_wrapper->totals.rows(), query_info_wrapper->extremes.rows());
             addTotalsToResult(query_info_wrapper->totals);
             addExtremesToResult(query_info_wrapper->extremes);
             addProfileInfoToResult(query_info_wrapper->profile_info);

@@ -61,7 +61,7 @@ DistributedSourceStep::DistributedSourceStep(
 
 void DistributedSourceStep::addPipe(Pipes & pipes, const std::shared_ptr<String> & source)
 {
-    auto distributed_source_executor = std::make_shared<DistributedSourceExecutor>(header, source, query_id, node_id, parent_stage_id);
+    auto distributed_source_executor = std::make_shared<DistributedSourceExecutor>(header, source, query_id, node_id, stage_id, parent_stage_id);
     pipes.emplace_back(createDistributedSourcePipe(
         distributed_source_executor, add_aggregation_info, add_totals, context->getSettingsRef().extremes, false));
     pipes.back().addInterpreterContext(context);

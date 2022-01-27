@@ -31,7 +31,7 @@ public:
         int parent_stage_id_,
         const String & node_id_,
         bool add_aggregation_info_,
-        bool add_totals_, /// Never use, should always be false.
+        bool add_totals_,
         ContextPtr context_);
 
     String getName() const override { return "DistributedSourceStep(" + toString(stage_id) + " <= " + toString(parent_stage_id) + ")"; }

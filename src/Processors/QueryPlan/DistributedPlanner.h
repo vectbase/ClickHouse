@@ -104,6 +104,7 @@ private:
     String debugRemotePlanFragment(const String & query, const String & receiver, const String & query_id, const Stage * stage);
 
     bool isSinglePointDataSource(const String & name);
+    void transferInterpreterParams(QueryPlan::Node *current_node, QueryPlan::Node *last_node);
     void buildStages();
     void debugStages();
 

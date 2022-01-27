@@ -1857,8 +1857,17 @@ void InterpreterSelectQuery::executeFetchColumns(QueryProcessingStage::Enum proc
             const auto & ast = query_info.query->as<ASTSelectQuery &>();
             InterpreterParamsPtr interpreter_params = std::make_shared<InterpreterParams>(context, ast);
             query_plan.addStep(std::move(prepared_count), std::move(interpreter_params));
-            /// Build query plan for the first stage both on compute and store nodes, therefore we can get the same original query plan.
-            /// If trivial count is optimized, skip executeWhere.
+            if (context->isInitialQuery() && context->getRunningMode() == Context::RunningMode::STORE)
+            {
+                /// If initial query is running on store worker, skip first stage.
+                from_stage = QueryProcessingStage::WithMergeableState;
+                analysis_result.first_stage = false;
+            }
+            else
+            {
+                /// Build query plan for the first stage both on compute and store nodes, therefore we can get the same original query plan.
+                /// If trivial count is optimized, skip executeWhere.
+            }
             analysis_result.optimize_trivial_count = true;
             return;
         }

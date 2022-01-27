@@ -154,6 +154,33 @@ void DistributedPlanner::checkShuffle(
     }
 }
 
+void DistributedPlanner::transferInterpreterParams(QueryPlan::Node *current_node, QueryPlan::Node *last_node)
+{
+    if (last_node->interpreter_params)
+    {
+        if (!current_node->interpreter_params)
+        {
+            current_node->interpreter_params = last_node->interpreter_params;
+            LOG_DEBUG(
+                log,
+                "Set context({} <= {}) to {}",
+                current_node->step->getName(),
+                last_node->step->getName(),
+                static_cast<const void *>(current_node->interpreter_params->context.get()));
+        }
+        else
+        {
+            current_node->interpreter_params->group_by_with_totals |= last_node->interpreter_params->group_by_with_totals;
+            LOG_DEBUG(
+                log,
+                "Merge group_by_with_totals({} <= {}) to {}",
+                current_node->step->getName(),
+                last_node->step->getName(),
+                current_node->interpreter_params->group_by_with_totals);
+        }
+    }
+}
+
 void DistributedPlanner::buildStages()
 {
     LOG_DEBUG(log, "===> Build stages.");
@@ -244,16 +271,7 @@ void DistributedPlanner::buildStages()
             }
 
             /// Transfer interpreter params bottom-up.
-            if (!frame.node->interpreter_params && last_node->interpreter_params)
-            {
-                frame.node->interpreter_params = last_node->interpreter_params;
-                LOG_DEBUG(
-                    log,
-                    "Set context({} <= {}) to {}",
-                    frame.node->step->getName(),
-                    last_node->step->getName(),
-                    static_cast<const void *>(frame.node->interpreter_params->context.get()));
-            }
+            transferInterpreterParams(frame.node, last_node);
 
             ++frame.visited_children;
             one_child_is_visited = false;
@@ -291,7 +309,9 @@ void DistributedPlanner::buildStages()
 
     /// Append result stage for converging data.
     ++stage_id;
+
     /// Create a virtual node, used in iterating stages.
+    /// It will be recreated in sending stages if needed.
     parent_stages.push(last_stage);
     auto step = std::make_unique<DistributedSourceStep>(stage_id, last_stage->id, context);
     query_plan.nodes.emplace_back(QueryPlan::Node{
@@ -648,7 +668,7 @@ void DistributedPlanner::scheduleStages(PlanResult & plan_result)
                         parent_stage->id,
                         *result_stage->workers.front(),
                         false,
-                        false,
+                        parent_stage_node->interpreter_params->group_by_with_totals,
                         context);
                     query_plan.addStep(std::move(distributed_source_step));
                     plan_result.distributed_source_nodes.emplace_back(query_plan.root);
@@ -850,7 +870,7 @@ void DistributedPlanner::scheduleStages(PlanResult & plan_result)
             query_info.set_has_view_source(stage.maybe_has_view_source);
             query_info.set_has_input_function(stage.has_input_function);
 
-            GRPCClient cli(*worker);
+            GRPCClient cli(*worker, "initiator");
             auto result = cli.executePlanFragment(query_info);
             LOG_DEBUG(
                 log,
@@ -923,16 +943,7 @@ void DistributedPlanner::buildPlanFragment(PlanResult & plan_result)
         if (one_child_is_visited)
         {
             /// Transfer interpreter params bottom-up.
-            if (!frame.node->interpreter_params && last_node->interpreter_params)
-            {
-                frame.node->interpreter_params = last_node->interpreter_params;
-                LOG_DEBUG(
-                    log,
-                    "Set context({} <= {}) to {}",
-                    frame.node->step->getName(),
-                    last_node->step->getName(),
-                    static_cast<const void *>(frame.node->interpreter_params->context.get()));
-            }
+            transferInterpreterParams(frame.node, last_node);
 
             CheckShuffleResult result;
             checkShuffle(frame.node, last_node, result, stage_seq, leaf_nodes);
@@ -979,12 +990,25 @@ void DistributedPlanner::buildPlanFragment(PlanResult & plan_result)
                                ? result.grandchild_step->getOutputStream().header
                                : aggregating_step->getOutputStream().header);
 
+                    bool add_totals = false;
+                    if (last_node->interpreter_params)
+                    {
+                        add_totals = last_node->interpreter_params->group_by_with_totals;
+                        LOG_DEBUG(log, "======== group_by_with_totals {}", last_node->interpreter_params->group_by_with_totals);
+                    }
                     /// Create DistributedSourceStep.
                     assert(header);
                     const auto & sources = it->second;
                     auto distributed_source_step = std::make_unique<DistributedSourceStep>(
-                        header, sources, query_distributed_plan_info.initial_query_id, my_stage_id, stage_id, my_replica,
-                        add_agg_info, false, context);
+                        header,
+                        sources,
+                        query_distributed_plan_info.initial_query_id,
+                        my_stage_id,
+                        stage_id,
+                        my_replica,
+                        add_agg_info,
+                        add_totals,
+                        context);
                     QueryPlan::Node * new_node = nullptr;
                     addStep(std::move(distributed_source_step), "", new_node);
                     plan_result.distributed_source_nodes.emplace_back(new_node); /// For debug
@@ -994,10 +1018,10 @@ void DistributedPlanner::buildPlanFragment(PlanResult & plan_result)
                     /// If parent stage has aggregate, add MergingAggregatedStep.
                     if (result.child_aggregating_step)
                     {
-                        assert(frame.node->interpreter_params);
-                        bool aggregate_final = !frame.node->interpreter_params->group_by_with_totals
-                                               && !frame.node->interpreter_params->group_by_with_rollup
-                                               && !frame.node->interpreter_params->group_by_with_cube;
+                        assert(last_node->interpreter_params);
+                        bool aggregate_final = !last_node->interpreter_params->group_by_with_totals
+                                               && !last_node->interpreter_params->group_by_with_rollup
+                                               && !last_node->interpreter_params->group_by_with_cube;
                         LOG_DEBUG(log, "MergingAggregatedStep final: {}", aggregate_final);
 
                         auto transform_params = std::make_shared<AggregatingTransformParams>(aggregating_step->getParams(), aggregate_final);

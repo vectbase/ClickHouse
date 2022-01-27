@@ -34,7 +34,7 @@ public:
         MAX = Extremes,
     };
 public:
-    GRPCClient(const String & addr_);
+    GRPCClient(const String & addr_, const String & description_);
     ~GRPCClient() = default;
 
     /// Send params of plan fragment to remote, and execute it.

@@ -10,11 +10,12 @@ class DistributedSourceExecutor
 public:
     /// Takes already set connection.
     DistributedSourceExecutor(
-        Block header_,
+        const Block & header_,
         const std::shared_ptr<String> & source_,
         const String & query_id_,
         const String & node_id_,
-        int stage_id_);
+        int stage_id_,
+        int parent_stage_id_);
 
     ~DistributedSourceExecutor();
 
@@ -36,6 +37,7 @@ private:
     String query_id;
     String node_id;
     int stage_id;
+    int parent_stage_id;
     GRPCClient client;
     Poco::Logger * log = nullptr;
     std::atomic<bool> finished{false};
