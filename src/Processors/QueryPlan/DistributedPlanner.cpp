@@ -164,17 +164,23 @@ void DistributedPlanner::buildStages()
 
         if (root_node)
         {
-            for (int i = 0; !parent_stages.empty() && i < root_node->num_parent_stages; ++i)
+            /// Fill parent stages.
+            assert(parent_stages.size() >= root_node->num_parent_stages);
+            new_stage->parents.resize(root_node->num_parent_stages);
+            for (int i = root_node->num_parent_stages - 1; !parent_stages.empty() && i >= 0; --i)
             {
-                new_stage->parents.emplace_back(parent_stages.top());
-                parent_stages.top()->child = new_stage;
+                new_stage->parents[i] = parent_stages.top();
+                new_stage->parents[i]->child = new_stage;
                 parent_stages.pop();
             }
-            for (int i = 0; !leaf_nodes.empty() && i < root_node->num_leaf_nodes_in_stage; ++i)
+            /// Fill leaf nodes.
+            assert(leaf_nodes.size() >= root_node->num_leaf_nodes_in_stage);
+            new_stage->leaf_nodes.resize(root_node->num_leaf_nodes_in_stage);
+            for (int i = root_node->num_leaf_nodes_in_stage - 1; !leaf_nodes.empty() && i >= 0; --i)
             {
-                new_stage->leaf_nodes.emplace_back(leaf_nodes.top());
+                new_stage->leaf_nodes[i] = leaf_nodes.top();
                 /// This leaf node is a data source node reading data from storage.
-                if (leaf_nodes.top()->children.empty())
+                if (new_stage->leaf_nodes[i]->children.empty())
                     new_stage->is_leaf_stage = true;
                 leaf_nodes.pop();
             }
@@ -885,7 +891,7 @@ void DistributedPlanner::buildPlanFragment(PlanResult & plan_result)
     auto popLeafNodes = [](QueryPlan::Node * root_node, std::stack<QueryPlan::Node *> & leaf_nodes) {
         if (root_node)
         {
-            for (int i = 0; !leaf_nodes.empty() && i < root_node->num_leaf_nodes_in_stage; ++i)
+            for (size_t i = 0; !leaf_nodes.empty() && i < root_node->num_leaf_nodes_in_stage; ++i)
             {
                 leaf_nodes.pop();
             }

@@ -124,8 +124,8 @@ public:
         QueryPlanStepPtr step;
         std::vector<Node *> children = {};
         Node * parent = nullptr;
-        int num_parent_stages = 0; /// Number of parent stages whose child is the stage current node belongs to.
-        int num_leaf_nodes_in_stage = 0; /// Number of leaf nodes(including current node and its descendant nodes) in the same stage.
+        size_t num_parent_stages = 0; /// Number of parent stages whose child is the stage current node belongs to.
+        size_t num_leaf_nodes_in_stage = 0; /// Number of leaf nodes(including current node and its descendant nodes) in the same stage.
         InterpreterParamsPtr interpreter_params;
     };
 
