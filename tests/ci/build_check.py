@@ -218,7 +218,7 @@ def main():
 
     s3_helper = S3Helper("https://s3.amazonaws.com")
 
-    version = get_version_from_repo(REPO_COPY)
+    version = get_version_from_repo()
     release_or_pr = get_release_or_pr(pr_info, build_config, version)
 
     s3_path_prefix = "/".join((release_or_pr, pr_info.sha, build_name))
