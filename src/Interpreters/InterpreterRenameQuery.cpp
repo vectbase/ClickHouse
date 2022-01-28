@@ -8,6 +8,7 @@
 #include <Access/AccessRightsElement.h>
 #include <Common/typeid_cast.h>
 #include <Databases/DatabaseReplicated.h>
+#include <Interpreters/DDLTask.h>
 
 
 namespace DB
@@ -51,6 +52,20 @@ BlockIO InterpreterRenameQuery::execute()
     TableGuards table_guards;
 
     std::map<String, zkutil::DistributedRWLockPtr> distributed_ddl_rw_locks;
+    /// Add distributed read-write lock for rename/exchange database/table operation
+    auto add_distributed_lock = [&](const String & db_name, const String & table_name, bool readonly)
+    {
+        String key = db_name;
+        if (!table_name.empty())
+        {
+            /// In practical no database should contains '/', this might cause error
+            key += ("/" + table_name);
+        }
+
+        if (!distributed_ddl_rw_locks.contains(key))
+            distributed_ddl_rw_locks[key] = zkutil::DistributedRWLock::tryLock(getContext()->getZooKeeper(), readonly, db_name, table_name);
+    };
+
     for (const auto & elem : rename.elements)
     {
         descriptions.emplace_back(elem, current_database);
@@ -62,30 +77,20 @@ BlockIO InterpreterRenameQuery::execute()
         table_guards[from];
         table_guards[to];
 
-        /// Add distributed read-write lock for rename/exchange database/table operation
-        auto add_distributed_lock = [&](const String & db_name, const String & table_name, bool readonly)
+        /// Only add distributed lock when it's initial query
+        if (auto txn = getContext()->getZooKeeperMetadataTransaction() && rename.is_initial)
         {
-            String key = db_name;
-            if (!table_name.empty())
+            /// Rename database not supported yet, so the 'rename.database' should always be false now.
+            /// But the code should also works for that case too
+            /// Add lock for both the original database/table and target database/table.
+            add_distributed_lock(from.database_name, "", !rename.database);
+            add_distributed_lock(to.database_name, "", !rename.database);
+            if (!rename.database)
             {
-                /// In practical no database should contains '/', this might cause error
-                key += ("/" + table_name);
+                add_distributed_lock(from.database_name, from.table_name, false);
+                if (rename.exchange)
+                    add_distributed_lock(to.database_name, to.table_name, false);
             }
-
-            if (!distributed_ddl_rw_locks.contains(key))
-                distributed_ddl_rw_locks[key] = zkutil::DistributedRWLock::tryLock(getContext()->getZooKeeper(), readonly, db_name, table_name);
-        };
-
-        /// rename database not supported yet, so the 'rename.database' should always be false now.
-        /// But the code should also works for that case too
-        /// Add lock for both the original database/table and target database/table.
-        add_distributed_lock(from.database_name, "", !rename.database);
-        add_distributed_lock(to.database_name, "", !rename.database);
-        if (!rename.database)
-        {
-            add_distributed_lock(from.database_name, from.table_name, false);
-            if (rename.exchange)
-                add_distributed_lock(to.database_name, to.table_name, false);
         }
     }
 

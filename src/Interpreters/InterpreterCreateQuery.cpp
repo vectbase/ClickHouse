@@ -1227,6 +1227,7 @@ BlockIO InterpreterCreateQuery::doCreateOrReplaceTable(ASTCreateQuery & create,
             ASTRenameQuery::Table{create.database, table_to_replace_name}
         };
 
+        ast_rename->is_initial = false;
         ast_rename->elements.push_back(std::move(elem));
         ast_rename->dictionary = create.is_dictionary;
         if (create.create_or_replace)
