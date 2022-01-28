@@ -1,6 +1,8 @@
 #include <Processors/QueryPlan/DistributedPlanner.h>
 #include <Processors/QueryPlan/IQueryPlanStep.h>
 #include <QueryPipeline/QueryPipelineBuilder.h>
+#include <Interpreters/IJoin.h>
+#include <Interpreters/TableJoin.h>
 #include <Processors/QueryPlan/ReadFromMergeTree.h>
 #include <Processors/QueryPlan/ReadFromRemote.h>
 #include <Processors/QueryPlan/DistributedSourceStep.h>
@@ -60,8 +62,8 @@ void DistributedPlanner::checkShuffle(
     result.current_union_step = dynamic_cast<UnionStep *>(current_node->step.get());
     if (result.current_union_step)
     {
-        LOG_DEBUG(log, "[{}]Check shuffle: child node is UnionStep", getStageSeqName(stage_seq));
         result.is_shuffle = true;
+        LOG_DEBUG(log, "[{}]Check shuffle: {}, current node is UnionStep", getStageSeqName(stage_seq), result.is_shuffle);
         stage_seq = StageSeq::STAGE1;
         return;
     }
@@ -69,22 +71,65 @@ void DistributedPlanner::checkShuffle(
     result.current_join_step = dynamic_cast<JoinStep *>(current_node->step.get());
     if (result.current_join_step)
     {
-        LOG_DEBUG(log, "[{}]Check shuffle: current node is JoinStep(0x{})", getStageSeqName(stage_seq), static_cast<void*>(result.current_join_step));
         assert(current_node->children.size() == 2);
-        /// Only broadcast right side.
-        if (child_node == current_node->children[1])
+        bool maybe_need_shuffle = false;
+        const auto join_kind = result.current_join_step->getJoin()->getTableJoin().kind();
+        if (isFull((join_kind)))
         {
-            if (child_node->num_parent_stages == 0 && child_node->num_leaf_nodes_in_stage == 1
-                && !leaf_nodes.empty() && isSinglePointDataSource(leaf_nodes.top()->step->getStepDescription()))
+            result.is_shuffle = true;
+            LOG_DEBUG(log, "[{}]Check shuffle: {}, current node is JoinStep(FULL JOIN)", getStageSeqName(stage_seq), result.is_shuffle);
+            return;
+        }
+        else if (isRight(join_kind))
+        {
+            if (child_node == current_node->children[1])
+            {
+                result.is_shuffle = false;
+                LOG_DEBUG(log, "[{}]Check shuffle: {}, current node is JoinStep(RIGHT JOIN && right side)", getStageSeqName(stage_seq), result.is_shuffle);
+            }
+            else
+                maybe_need_shuffle = true;
+        }
+        else if (isLeft(join_kind))
+        {
+            if (child_node == current_node->children[0])
+            {
+                result.is_shuffle = false;
+                LOG_DEBUG(log, "[{}]Check shuffle: {}, current node is JoinStep(LEFT JOIN && left side)", getStageSeqName(stage_seq), result.is_shuffle);
+            }
+            else
+                maybe_need_shuffle = true;
+        }
+        else if (child_node == current_node->children[1])
+        {
+            maybe_need_shuffle = true;
+        }
+
+        if (maybe_need_shuffle)
+        {
+            /// Broadcast one side:
+            /// 1. LEFT JOIN && child is right: broadcast right side.
+            /// 2. RIGHT JOIN && child is left: broadcast left side.
+            /// 3. Other cases: broadcast right side.
+            if (child_node->num_parent_stages == 0 && child_node->num_leaf_nodes_in_stage == 1 && !leaf_nodes.empty()
+                && isSinglePointDataSource(leaf_nodes.top()->step->getStepDescription()))
             {
                 /// 1. Storage name is SystemNumbers: select ... from t1, numbers(10) n
                 /// 2. Storage name is Memory: select ... from t1 join (select number from numbers(1))
                 /// 3. Storage name is Memory: select ... from t1 join t2
-                LOG_DEBUG(log, "No need shuffle: right child's storage is {}", leaf_nodes.top()->step->getStepDescription());
                 result.is_shuffle = false;
+                LOG_DEBUG(
+                    log,
+                    "[{}]Check shuffle: {}, current node is JoinStep, child's storage is {}",
+                    getStageSeqName(stage_seq),
+                    result.is_shuffle,
+                    leaf_nodes.top()->step->getStepDescription());
             }
             else
+            {
                 result.is_shuffle = true;
+                LOG_DEBUG(log, "[{}]Check shuffle: {}, current node is JoinStep", getStageSeqName(stage_seq), result.is_shuffle);
+            }
         }
         stage_seq = StageSeq::STAGE1;
         return;
@@ -95,9 +140,9 @@ void DistributedPlanner::checkShuffle(
     {
         /// From : AggregatingStep =>
         /// To   : AggregatingStep(partial) [=> MergingAggregatedStep(final)] =>
-        LOG_DEBUG(log, "[{}]Check shuffle: child node is AggregatingStep", getStageSeqName(stage_seq));
         result.grandchild_step = child_node->children.front()->step.get();
         result.is_shuffle = true;
+        LOG_DEBUG(log, "[{}]Check shuffle: {}, child node is AggregatingStep", getStageSeqName(stage_seq), result.is_shuffle);
         stage_seq = StageSeq::STAGE2;
         return;
     }
@@ -107,14 +152,15 @@ void DistributedPlanner::checkShuffle(
     {
         /// From : SortingStep => Not (LimitStep) =>
         /// To   : SortingStep(partial) [=> SortingStep(final)] => Not (LimitStep) =>
-        LOG_DEBUG(log, "[{}]Check shuffle: child node is SortingStep", getStageSeqName(stage_seq));
         if (stage_seq == StageSeq::STAGE2)
         {
             result.is_shuffle = false;
+            LOG_DEBUG(log, "[{}]Check shuffle: {}, child node is SortingStep", getStageSeqName(stage_seq), result.is_shuffle);
         }
         else if (!(result.current_limit_step = dynamic_cast<LimitStep *>(current_node->step.get())))
         {
             result.is_shuffle = true;
+            LOG_DEBUG(log, "[{}]Check shuffle: {}, child node is SortingStep", getStageSeqName(stage_seq), result.is_shuffle);
             stage_seq = StageSeq::STAGE2;
         }
         return;
@@ -122,12 +168,12 @@ void DistributedPlanner::checkShuffle(
 
     if ((result.child_distinct_step = dynamic_cast<DistinctStep *>(child_node->step.get())))
     {
-        LOG_DEBUG(log, "[{}]Check shuffle: child node is DistinctStep", getStageSeqName(stage_seq));
         result.current_distinct_step = dynamic_cast<DistinctStep *>(current_node->step.get());
         if (result.current_distinct_step)
         {
             /// DistinctStep(partial) => (shuffle) => DistinctStep(final) =>
             result.is_shuffle = true;
+            LOG_DEBUG(log, "[{}]Check shuffle: {}, both of child and current nodes are DistinctStep", getStageSeqName(stage_seq), result.is_shuffle);
             stage_seq = StageSeq::STAGE2;
         }
         return;
@@ -160,23 +206,34 @@ void DistributedPlanner::transferInterpreterParams(QueryPlan::Node *current_node
     {
         if (!current_node->interpreter_params)
         {
-            current_node->interpreter_params = last_node->interpreter_params;
+            if (current_node->children.size() == 1)
+                current_node->interpreter_params = last_node->interpreter_params;
+            else
+                current_node->interpreter_params = std::make_shared<InterpreterParams>(*last_node->interpreter_params);
             LOG_DEBUG(
                 log,
-                "Set context({} <= {}) to {}",
+                "Set context({}({}) <= {}({})) to {}",
                 current_node->step->getName(),
+                current_node->interpreter_params->group_by_with_totals,
                 last_node->step->getName(),
+                last_node->interpreter_params->group_by_with_totals,
                 static_cast<const void *>(current_node->interpreter_params->context.get()));
         }
-        else
+        else if (current_node->children.size() > 1)
         {
-            current_node->interpreter_params->group_by_with_totals |= last_node->interpreter_params->group_by_with_totals;
+            /// For Join and Union, not for ITransformingStep.
+            bool merged_with_totals = current_node->interpreter_params->group_by_with_totals | last_node->interpreter_params->group_by_with_totals;
             LOG_DEBUG(
                 log,
-                "Merge group_by_with_totals({} <= {}) to {}",
+                "Merge group_by_with_totals({}({}/{}) <= {}({}/{})) to {}",
                 current_node->step->getName(),
+                static_cast<void *>(current_node->interpreter_params.get()),
+                current_node->interpreter_params->group_by_with_totals,
                 last_node->step->getName(),
-                current_node->interpreter_params->group_by_with_totals);
+                static_cast<void *>(last_node->interpreter_params.get()),
+                last_node->interpreter_params->group_by_with_totals,
+                merged_with_totals);
+            current_node->interpreter_params->group_by_with_totals = merged_with_totals;
         }
     }
 }
@@ -185,7 +242,12 @@ void DistributedPlanner::buildStages()
 {
     LOG_DEBUG(log, "===> Build stages.");
 
-    auto createStage = [this](int id, std::stack<Stage *> & parent_stages, QueryPlan::Node * root_node, std::stack<QueryPlan::Node *> & leaf_nodes) {
+    StageSeq stage_seq = StageSeq::STAGE1;
+    auto createStage = [this, &stage_seq](
+                           int id,
+                           std::stack<Stage *> & parent_stages,
+                           QueryPlan::Node * root_node,
+                           std::stack<QueryPlan::Node *> & leaf_nodes) {
         stages.emplace_back(Stage{.id = id, .root_node = root_node});
         Stage * new_stage = &stages.back();
 
@@ -212,7 +274,7 @@ void DistributedPlanner::buildStages()
                 leaf_nodes.pop();
             }
         }
-        LOG_DEBUG(log, "Create stage: id: {}, has {} parent stages and {} leaf nodes.", id, new_stage->parents.size(), new_stage->leaf_nodes.size());
+        LOG_DEBUG(log, "[{}]Create stage: id: {}({} parent stages, {} leaf nodes).",getStageSeqName(stage_seq), id, new_stage->parents.size(), new_stage->leaf_nodes.size());
         return new_stage;
     };
 
@@ -234,7 +296,6 @@ void DistributedPlanner::buildStages()
     Stage * last_stage = nullptr;
     std::stack<Stage *> parent_stages;
     std::stack<QueryPlan::Node *> leaf_nodes;
-    StageSeq stage_seq = StageSeq::STAGE1;
 
     while (!stack.empty())
     {
@@ -318,13 +379,15 @@ void DistributedPlanner::buildStages()
         .step = std::move(step),
         .children = {last_node},
         .num_parent_stages = 1,
-        .interpreter_params = query_plan.root->interpreter_params});
+        .interpreter_params = last_node->interpreter_params});
     query_plan.root = &query_plan.nodes.back();
     LOG_DEBUG(
         log,
-        "Set context({} <= {}) to {}",
+        "Set context({}({}) <= {}({})) to {}",
         query_plan.root->step->getName(),
+        query_plan.root->interpreter_params->group_by_with_totals,
         last_node->step->getName(),
+        last_node->interpreter_params->group_by_with_totals,
         static_cast<const void *>(query_plan.root->interpreter_params->context.get()));
 
     /// Maintain leaf nodes.
@@ -961,18 +1024,26 @@ void DistributedPlanner::buildPlanFragment(PlanResult & plan_result)
                     assert(last_node == frame.node->children[frame.visited_children]);
 
                     /// Add steps between current node and child node.
-                    auto addStep = [this, &stage_id, &frame](QueryPlanStepPtr step, const String & description, QueryPlan::Node * & node)
+                    auto addStep = [this, &stage_id, &last_node, &stage_seq](QueryPlanStepPtr step, const String & description, QueryPlan::Node * & node)
                     {
-                        LOG_DEBUG(log, "Add step: {}, parent stage: {}", step->getName(), stage_id);
+                        LOG_DEBUG(log, "[{}]Add step: {}, parent stage id: {}", getStageSeqName(stage_seq), step->getName(), stage_id);
                         step->setStepDescription(description);
                         if (!node)
-                            query_plan.nodes.emplace_back(QueryPlan::Node{.step = std::move(step), .interpreter_params = frame.node->interpreter_params});
+                            query_plan.nodes.emplace_back(QueryPlan::Node{.step = std::move(step), .interpreter_params = last_node->interpreter_params});
                         else
                         {
-                            query_plan.nodes.emplace_back(QueryPlan::Node{.step = std::move(step), .children = {node}, .interpreter_params = frame.node->interpreter_params});
+                            query_plan.nodes.emplace_back(QueryPlan::Node{.step = std::move(step), .children = {node}, .interpreter_params = last_node->interpreter_params});
                             node->parent = &query_plan.nodes.back();
                         }
                         node = &query_plan.nodes.back();
+                        LOG_DEBUG(
+                            log,
+                            "Set context({}({}) <= {}({})) to {}",
+                            node->step->getName(),
+                            node->interpreter_params->group_by_with_totals,
+                            last_node->step->getName(),
+                            last_node->interpreter_params->group_by_with_totals,
+                            static_cast<const void *>(node->interpreter_params->context.get()));
                     };
 
                     bool add_agg_info = false;
@@ -990,12 +1061,6 @@ void DistributedPlanner::buildPlanFragment(PlanResult & plan_result)
                                ? result.grandchild_step->getOutputStream().header
                                : aggregating_step->getOutputStream().header);
 
-                    bool add_totals = false;
-                    if (last_node->interpreter_params)
-                    {
-                        add_totals = last_node->interpreter_params->group_by_with_totals;
-                        LOG_DEBUG(log, "======== group_by_with_totals {}", last_node->interpreter_params->group_by_with_totals);
-                    }
                     /// Create DistributedSourceStep.
                     assert(header);
                     const auto & sources = it->second;
@@ -1007,7 +1072,7 @@ void DistributedPlanner::buildPlanFragment(PlanResult & plan_result)
                         stage_id,
                         my_replica,
                         add_agg_info,
-                        add_totals,
+                        last_node->interpreter_params->group_by_with_totals,
                         context);
                     QueryPlan::Node * new_node = nullptr;
                     addStep(std::move(distributed_source_step), "", new_node);
@@ -1067,9 +1132,9 @@ void DistributedPlanner::buildPlanFragment(PlanResult & plan_result)
                 }
                 else if (stage_id == my_stage_id)
                 {
-                    auto replaceStep = [this, &stage_id](QueryPlanStepPtr step, QueryPlan::Node * & node)
+                    auto replaceStep = [this, &stage_id, &stage_seq](QueryPlanStepPtr step, QueryPlan::Node * & node)
                     {
-                        LOG_DEBUG(log, "Replace step: {}, stage: {}", step->getName(), stage_id);
+                        LOG_DEBUG(log, "[{}]Replace step: {}, stage: {}", getStageSeqName(stage_seq), step->getName(), stage_id);
                         node->step = std::move(step);
                     };
 
@@ -1092,7 +1157,7 @@ void DistributedPlanner::buildPlanFragment(PlanResult & plan_result)
                         /// If optimize trivial count, remove AggregatingStep.
                         else
                         {
-                            LOG_DEBUG(log, "Remove step: {}, stage: {}", result.child_aggregating_step->getName(), stage_id);
+                            LOG_DEBUG(log, "[{}]Remove step: {}, stage: {}", getStageSeqName(stage_seq), result.child_aggregating_step->getName(), stage_id);
                             last_node = last_node->children[0];
                         }
                     }

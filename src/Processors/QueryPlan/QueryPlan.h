@@ -46,6 +46,15 @@ struct InterpreterParams
         group_by_with_rollup = query_ast_.group_by_with_rollup;
         group_by_with_cube = query_ast_.group_by_with_cube;
     }
+
+    InterpreterParams(const InterpreterParams & interpreter_params)
+        : context(interpreter_params.context)
+        , group_by_with_totals(interpreter_params.group_by_with_totals)
+        , group_by_with_rollup(interpreter_params.group_by_with_rollup)
+        , group_by_with_cube(interpreter_params.group_by_with_cube)
+    {
+    }
+
     ContextPtr context;
     bool group_by_with_totals;
     bool group_by_with_rollup;
