@@ -1425,6 +1425,14 @@ void registerStorageEmbeddedDistributed(StorageFactory & factory)
                 distributed_settings.monitor_max_sleep_time_ms
                     = Poco::Timespan(context->getSettingsRef().distributed_directory_monitor_max_sleep_time_ms);
 
+            String name_part = args.engine_name.substr(0, args.engine_name.size() - strlen("MergeTree"));
+            bool replicated = startsWith(name_part, "Replicated");
+            String storage_policy;
+            if (replicated)
+                storage_policy = std::make_unique<MergeTreeSettings>(args.getContext()->getReplicatedMergeTreeSettings()).get()->storage_policy;
+            else
+                storage_policy = std::make_unique<MergeTreeSettings>(args.getContext()->getMergeTreeSettings()).get()->storage_policy;
+
             return StorageDistributed::create(
                 args.table_id,
                 args.columns,
@@ -1435,7 +1443,7 @@ void registerStorageEmbeddedDistributed(StorageFactory & factory)
                 "store",
                 context,
                 nullptr,
-                "default",
+                storage_policy,
                 args.relative_data_path,
                 distributed_settings,
                 args.attach);

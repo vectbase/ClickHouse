@@ -146,6 +146,8 @@ public:
 
     void rename(const String & new_path_to_table_data, const StorageID & new_table_id) override;
 
+    void renameInMemory(const StorageID & new_table_id) override;
+
     bool supportsIndexForIn() const override { return true; }
 
     void checkTableCanBeDropped() const override;

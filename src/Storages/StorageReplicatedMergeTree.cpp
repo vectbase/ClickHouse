@@ -32,6 +32,7 @@
 #include <Storages/MergeTree/MutateFromLogEntryTask.h>
 #include <Storages/VirtualColumnUtils.h>
 #include <Storages/MergeTree/MergeTreeReaderCompact.h>
+#include <Storages/StorageDistributed.h>
 
 
 #include <Databases/IDatabase.h>
@@ -5041,6 +5042,7 @@ void StorageReplicatedMergeTree::checkTableCanBeRenamed() const
 void StorageReplicatedMergeTree::rename(const String & new_path_to_table_data, const StorageID & new_table_id)
 {
     checkTableCanBeRenamed();
+    renameInMemory(new_table_id);
     MergeTreeData::rename(new_path_to_table_data, new_table_id);
 
     /// Update table name in zookeeper
@@ -5060,6 +5062,22 @@ void StorageReplicatedMergeTree::rename(const String & new_path_to_table_data, c
     }
 
     /// TODO: You can update names of loggers.
+}
+
+void StorageReplicatedMergeTree::renameInMemory(const StorageID & new_table_id)
+{
+    if (embedded_distributed)
+    {
+        auto embedded_distributed_table = std::dynamic_pointer_cast<StorageDistributed>(embedded_distributed);
+        if (!embedded_distributed_table)
+            throw Exception(
+                "Table " + getStorageID().getNameForLogs() + " embedded_distributed only for StorageDistributed table engine.",
+                ErrorCodes::NOT_IMPLEMENTED);
+        embedded_distributed_table->setRemoteDatabaseName(new_table_id.database_name);
+        embedded_distributed_table->setRemoteTableName(new_table_id.table_name);
+        embedded_distributed->renameInMemory(new_table_id);
+    }
+    IStorage::renameInMemory(new_table_id);
 }
 
 

@@ -94,6 +94,10 @@ public:
 
     void onActionLockRemove(StorageActionBlockType action_type) override;
 
+    void rename(const String & new_path_to_table_data, const StorageID & new_table_id) override;
+
+    void renameInMemory(const StorageID & new_table_id) override;
+
     CheckResults checkData(const ASTPtr & query, ContextPtr context) override;
 
     RestoreDataTasks restoreFromBackup(const BackupPtr & backup, const String & data_path_in_backup, const ASTs & partitions, ContextMutablePtr context) override;
