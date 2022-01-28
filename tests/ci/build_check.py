@@ -255,13 +255,13 @@ def main():
     docker_image = get_image_with_version(IMAGES_PATH, image_name)
     image_version = docker_image.version
 
-    logging.info("Got version from repo %s", version.get_version_string())
+    logging.info("Got version from repo %s", version.string)
 
     version_type = "testing"
     if "release" in pr_info.labels or "release-lts" in pr_info.labels:
         version_type = "stable"
 
-    update_version_local(REPO_COPY, pr_info.sha, version, version_type)
+    update_version_local(REPO_COPY, version, version_type)
 
     logging.info("Updated local files with version")
 
@@ -290,7 +290,7 @@ def main():
         build_config,
         os.path.join(REPO_COPY, "docker/packager"),
         build_output_path,
-        version.get_version_string(),
+        version.string,
         image_version,
         ccache_path,
         pr_info,
