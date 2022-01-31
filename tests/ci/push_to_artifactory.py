@@ -8,6 +8,7 @@ from typing import Tuple
 
 from artifactory import ArtifactorySaaSPath  # type: ignore
 from build_download_helper import dowload_build_with_progress
+from git_helper import SHA_REGEXP, TAG_REGEXP
 
 
 # Py 3.8 removeprefix and removesuffix
@@ -124,7 +125,7 @@ class S3:
 
 class Release:
     def __init__(self, name: str):
-        r = re.compile(r"^v\d{2}[.]\d+[.]\d+[.]\d+-(testing|prestable|stable|lts)$")
+        r = re.compile(TAG_REGEXP)
         # Automatically remove refs/tags/ if full refname passed here
         name = removeprefix(name, "refs/tags/")
         if not r.match(name):
@@ -213,7 +214,7 @@ class Artifactory:
 
 
 def commit(name: str):
-    r = re.compile(r"^([0-9]|[a-f]){40}$")
+    r = re.compile(SHA_REGEXP)
     if not r.match(name):
         raise argparse.ArgumentTypeError(
             "commit hash should contain exactly 40 hex characters"
