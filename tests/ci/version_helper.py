@@ -81,27 +81,27 @@ class ClickHouseVersion:
         )
 
     @property
-    def major(self):
+    def major(self) -> int:
         return self._major
 
     @property
-    def minor(self):
+    def minor(self) -> int:
         return self._minor
 
     @property
-    def patch(self):
+    def patch(self) -> int:
         return self._patch
 
     @property
-    def tweak(self):
+    def tweak(self) -> int:
         return self._tweak
 
     @property
-    def revision(self):
+    def revision(self) -> int:
         return self._revision
 
     @property
-    def githash(self):
+    def githash(self) -> str:
         return self._git.sha
 
     @property
@@ -187,7 +187,7 @@ def update_cmake_version(
         f.write(VERSIONS_TEMPLATE.format_map(version.as_dict()))
 
 
-def _update_changelog(repo_path, version):
+def _update_changelog(repo_path: str, version: ClickHouseVersion):
     cmd = """sed \
         -e "s/[@]VERSION_STRING[@]/{version_str}/g" \
         -e "s/[@]DATE[@]/{date}/g" \
@@ -195,7 +195,7 @@ def _update_changelog(repo_path, version):
         -e "s/[@]EMAIL[@]/clickhouse-release@yandex-team.ru/g" \
         < {in_path} > {changelog_path}
     """.format(
-        version_str=version.get_version_string(),
+        version_str=version.string(),
         date=datetime.datetime.now().strftime("%a, %d %b %Y %H:%M:%S") + " +0300",
         in_path=p.join(repo_path, CHANGELOG_IN_PATH),
         changelog_path=p.join(repo_path, CHANGELOG_PATH),
@@ -229,7 +229,7 @@ def update_contributors(relative_contributors_path: str = GENERATED_CONTRIBUTORS
         cfd.write(content)
 
 
-def _update_dockerfile(repo_path, version):
+def _update_dockerfile(repo_path: str, version: ClickHouseVersion):
     version_str_for_docker = ".".join(
         [str(version.major), str(version.minor), str(version.patch), "*"]
     )

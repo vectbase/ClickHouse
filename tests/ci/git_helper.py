@@ -29,24 +29,54 @@ class Git:
         runner = Runner()
         rel_root = runner.run("git rev-parse --show-cdup")
         self.root = p.realpath(p.join(runner.cwd, rel_root))
+        self._tag_pattern = re.compile(TAG_REGEXP)
         runner.cwd = self.root
         self.run = runner.run
+        self.new_branch = ""
+        self.branch = ""
+        self.sha = ""
+        self.sha_short = ""
+        self.description = ""
+        self.commits_since_tag = 0
+        self.update()
+
+    def update(self):
+        """Is used to refresh all attributes after updates, e.g. checkout or commit"""
         self.branch = self.run("git branch --show-current")
         self.sha = self.run("git rev-parse HEAD")
         self.sha_short = self.sha[:11]
         # The following command shows the most recent tag in a graph
         # Format should match TAG_REGEXP
         self.latest_tag = self.run("git describe --tags --abbrev=0")
-        pattern = re.compile(TAG_REGEXP)
-        if not pattern.match(self.latest_tag):
-            raise Exception(f"last tag {self.latest_tag} doesn't match the pattern")
         # Format should be: {latest_tag}-{commits_since_tag}-g{sha_short}
         self.description = self.run("git describe --tags --long")
         self.commits_since_tag = int(
             self.run(f"git rev-list {self.latest_tag}..HEAD --count")
         )
-        self.new_branch = ""
-        self.new_tag = ""
+
+    def _check_tag(self, value: str):
+        if value == "":
+            return
+        if not self._tag_pattern.match(value):
+            raise Exception(f"last tag {value} doesn't match the pattern")
+
+    @property
+    def latest_tag(self):
+        return self._latest_tag
+
+    @latest_tag.setter
+    def latest_tag(self, value: str):
+        self._check_tag(value)
+        self._latest_tag = value
+
+    @property
+    def new_tag(self):
+        return self._new_tag
+
+    @new_tag.setter
+    def new_tag(self, value: str):
+        self._check_tag(value)
+        self._new_tag = value
 
     @property
     def tweak(self):
