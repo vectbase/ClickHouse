@@ -4,7 +4,7 @@ import logging
 import os.path as p
 import subprocess
 import sys
-from typing import Dict, Union
+from typing import Dict, Tuple, Union
 
 from git_helper import Git
 from push_to_artifactory import removeprefix
@@ -123,7 +123,7 @@ class ClickHouseVersion:
             "string": self.string,
         }
 
-    def as_tuple(self):
+    def as_tuple(self) -> Tuple[int, int, int, int]:
         return (self.major, self.minor, self.patch, self.tweak)
 
     def with_description(self, version_type):
@@ -195,7 +195,7 @@ def _update_changelog(repo_path: str, version: ClickHouseVersion):
         -e "s/[@]EMAIL[@]/clickhouse-release@yandex-team.ru/g" \
         < {in_path} > {changelog_path}
     """.format(
-        version_str=version.string(),
+        version_str=version.string,
         date=datetime.datetime.now().strftime("%a, %d %b %Y %H:%M:%S") + " +0300",
         in_path=p.join(repo_path, CHANGELOG_IN_PATH),
         changelog_path=p.join(repo_path, CHANGELOG_PATH),

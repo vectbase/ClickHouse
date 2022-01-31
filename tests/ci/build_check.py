@@ -175,7 +175,7 @@ def get_release_or_pr(
         # for pushes to master - major version, but not for performance builds
         # they havily relies on a fixed path for build package and nobody going
         # to deploy them somewhere, so it's ok.
-        return ".".join(version.as_tuple()[:2])
+        return f"{version.major}.{version.minor}"
     # PR number for anything else
     return str(pr_info.number)
 
