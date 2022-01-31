@@ -150,7 +150,7 @@ def read_versions(filename: str) -> VERSIONS:
 
             value = 0  # type: Union[int, str]
             name, value = line[4:-1].split(maxsplit=1)
-            name = removeprefix(name, "VERSION").lower()
+            name = removeprefix(name, "VERSION_").lower()
             try:
                 value = int(value)
             except ValueError:
