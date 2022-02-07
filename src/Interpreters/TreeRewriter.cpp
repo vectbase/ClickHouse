@@ -725,6 +725,7 @@ TreeRewriterResult::TreeRewriterResult(
 {
     collectSourceColumns(add_special);
     is_remote_storage = storage && storage->isRemote();
+    should_add_external_storage = is_remote_storage || (storage && storage->getName().ends_with("MergeTree"));
 }
 
 /// Add columns from storage to source_columns list. Deduplicate resulted list.

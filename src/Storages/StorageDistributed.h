@@ -109,7 +109,9 @@ public:
     NamesAndTypesList getVirtuals() const override;
 
     /// Used by InterpreterInsertQuery
+    void setRemoteDatabaseName(const String & remote_database_) { remote_database = remote_database_; }
     std::string getRemoteDatabaseName() const { return remote_database; }
+    void setRemoteTableName(const String & remote_table_) { remote_table = remote_table_; }
     std::string getRemoteTableName() const { return remote_table; }
     /// Returns empty string if tables is used by TableFunctionRemote
     std::string getClusterName() const { return cluster_name; }

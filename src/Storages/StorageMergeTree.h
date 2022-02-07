@@ -94,6 +94,10 @@ public:
 
     void onActionLockRemove(StorageActionBlockType action_type) override;
 
+    void rename(const String & new_path_to_table_data, const StorageID & new_table_id) override;
+
+    void renameInMemory(const StorageID & new_table_id) override;
+
     CheckResults checkData(const ASTPtr & query, ContextPtr context) override;
 
     RestoreDataTasks restoreFromBackup(const BackupPtr & backup, const String & data_path_in_backup, const ASTs & partitions, ContextMutablePtr context) override;
@@ -136,6 +140,8 @@ private:
     std::multimap<Int64, MergeTreeMutationEntry &> current_mutations_by_version;
 
     std::atomic<bool> shutdown_called {false};
+
+    StoragePtr embedded_distributed;
 
 private:
     void loadMutations();
@@ -236,7 +242,8 @@ protected:
         const String & date_column_name,
         const MergingParams & merging_params_,
         std::unique_ptr<MergeTreeSettings> settings_,
-        bool has_force_restore_data_flag);
+        bool has_force_restore_data_flag,
+        StoragePtr embedded_distributed_);
 
     MutationCommands getFirstAlterMutationCommandsForPart(const DataPartPtr & part) const override;
 };

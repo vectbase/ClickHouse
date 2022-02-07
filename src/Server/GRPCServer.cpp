@@ -1,6 +1,7 @@
 #include "GRPCServer.h"
 #include <limits>
 #include <memory>
+#include <list>
 #if USE_GRPC
 
 #include <Columns/ColumnString.h>
@@ -43,9 +44,12 @@
 #include <grpc++/server.h>
 #include <grpc++/server_builder.h>
 
+#include <base/logger_useful.h>
 
+using namespace std::chrono_literals;
 using GRPCService = clickhouse::grpc::ClickHouse::AsyncService;
 using GRPCQueryInfo = clickhouse::grpc::QueryInfo;
+using GRPCTicket = clickhouse::grpc::Ticket;
 using GRPCResult = clickhouse::grpc::Result;
 using GRPCException = clickhouse::grpc::Exception;
 using GRPCProgress = clickhouse::grpc::Progress;
@@ -214,15 +218,17 @@ namespace
     String getQueryDescription(const GRPCQueryInfo & query_info)
     {
         String str;
+        if (!query_info.initial_query_id().empty())
+            str.append("query info key: ").append(query_info.initial_query_id() + "/" + toString(query_info.stage_id()));
         if (!query_info.query().empty())
         {
             std::string_view query = query_info.query();
-            constexpr size_t max_query_length_to_log = 64;
+            constexpr size_t max_query_length_to_log = 512;
             if (query.length() > max_query_length_to_log)
                 query.remove_suffix(query.length() - max_query_length_to_log);
             if (size_t format_pos = query.find(" FORMAT "); format_pos != String::npos)
                 query.remove_suffix(query.length() - format_pos - strlen(" FORMAT "));
-            str.append("\"").append(query);
+            str.append(str.empty() ? "" : ", ").append("query: ").append("\"").append(query);
             if (query != query_info.query())
                 str.append("...");
             str.append("\"");
@@ -272,6 +278,7 @@ namespace
                            const CompletionCallback & callback) = 0;
 
         virtual void read(GRPCQueryInfo & query_info_, const CompletionCallback & callback) = 0;
+        virtual void read(GRPCTicket & ticket_, const CompletionCallback & callback) = 0;
         virtual void write(const GRPCResult & result, const CompletionCallback & callback) = 0;
         virtual void writeAndFinish(const GRPCResult & result, const grpc::Status & status, const CompletionCallback & callback) = 0;
 
@@ -329,6 +336,9 @@ namespace
         CALL_WITH_STREAM_INPUT,  /// ExecuteQueryWithStreamInput() call
         CALL_WITH_STREAM_OUTPUT, /// ExecuteQueryWithStreamOutput() call
         CALL_WITH_STREAM_IO,     /// ExecuteQueryWithStreamIO() call
+        CALL_EXECUTE_PLAN_FRAGMENT,        /// ExecutePlanFragment() call
+        CALL_FETCH_PLAN_FRAGMENT_RESULT,   /// FetchPlanFragmentResult() call
+        CALL_CANCEL_PLAN_FRAGMENT,         /// CancelPlanFragment() call
         CALL_MAX,
     };
 
@@ -340,6 +350,9 @@ namespace
             case CALL_WITH_STREAM_INPUT: return "ExecuteQueryWithStreamInput()";
             case CALL_WITH_STREAM_OUTPUT: return "ExecuteQueryWithStreamOutput()";
             case CALL_WITH_STREAM_IO: return "ExecuteQueryWithStreamIO()";
+            case CALL_EXECUTE_PLAN_FRAGMENT: return "ExecutePlanFragment()";
+            case CALL_FETCH_PLAN_FRAGMENT_RESULT: return "FetchPlanFragmentResult()";
+            case CALL_CANCEL_PLAN_FRAGMENT: return "CancelPlanFragment";
             case CALL_MAX: break;
         }
         __builtin_unreachable();
@@ -352,7 +365,7 @@ namespace
 
     bool isOutputStreaming(CallType call_type)
     {
-        return (call_type == CALL_WITH_STREAM_OUTPUT) || (call_type == CALL_WITH_STREAM_IO);
+        return (call_type == CALL_WITH_STREAM_OUTPUT) || (call_type == CALL_WITH_STREAM_IO)  || (call_type == CALL_FETCH_PLAN_FRAGMENT_RESULT);
     }
 
     template <enum CallType call_type>
@@ -377,6 +390,11 @@ namespace
             query_info_ = std::move(query_info).value();
             query_info.reset();
             callback(true);
+        }
+
+        void read(GRPCTicket &, const CompletionCallback &) override
+        {
+            throw Exception("Responder<CALL_SIMPLE>::read() should not be called", ErrorCodes::LOGICAL_ERROR);
         }
 
         void write(const GRPCResult &, const CompletionCallback &) override
@@ -409,6 +427,11 @@ namespace
         void read(GRPCQueryInfo & query_info_, const CompletionCallback & callback) override
         {
             reader.Read(&query_info_, getCallbackPtr(callback));
+        }
+
+        void read(GRPCTicket &, const CompletionCallback &) override
+        {
+            throw Exception("Responder<CALL_WITH_STREAM_INPUT>::read() should not be called", ErrorCodes::LOGICAL_ERROR);
         }
 
         void write(const GRPCResult &, const CompletionCallback &) override
@@ -446,6 +469,11 @@ namespace
             callback(true);
         }
 
+        void read(GRPCTicket &, const CompletionCallback &) override
+        {
+            throw Exception("Responder<CALL_WITH_STREAM_OUTPUT>::read() should not be called", ErrorCodes::LOGICAL_ERROR);
+        }
+
         void write(const GRPCResult & result, const CompletionCallback & callback) override
         {
             writer.Write(result, getCallbackPtr(callback));
@@ -478,6 +506,11 @@ namespace
             reader_writer.Read(&query_info_, getCallbackPtr(callback));
         }
 
+        void read(GRPCTicket &, const CompletionCallback &) override
+        {
+            throw Exception("Responder<CALL_WITH_STREAM_IO>::read() should not be called", ErrorCodes::LOGICAL_ERROR);
+        }
+
         void write(const GRPCResult & result, const CompletionCallback & callback) override
         {
             reader_writer.Write(result, getCallbackPtr(callback));
@@ -492,6 +525,129 @@ namespace
         grpc::ServerAsyncReaderWriter<GRPCResult, GRPCQueryInfo> reader_writer{&grpc_context};
     };
 
+    template<>
+    class Responder<CALL_EXECUTE_PLAN_FRAGMENT> : public BaseResponder
+    {
+    public:
+        void start(GRPCService & grpc_service,
+                   grpc::ServerCompletionQueue & new_call_queue,
+                   grpc::ServerCompletionQueue & notification_queue,
+                   const CompletionCallback & callback) override
+        {
+            grpc_service.RequestExecutePlanFragment(&grpc_context, &query_info.emplace(), &response_writer, &new_call_queue, &notification_queue, getCallbackPtr(callback));
+        }
+
+        void read(GRPCQueryInfo & query_info_, const CompletionCallback & callback) override
+        {
+            if (!query_info.has_value())
+                callback(false);
+            query_info_ = std::move(query_info).value();
+            query_info.reset();
+            callback(true);
+        }
+
+        void read(GRPCTicket &, const CompletionCallback &) override
+        {
+            throw Exception("Responder<CALL_FRAGMENT_SIMPLE>::read() should not be called", ErrorCodes::LOGICAL_ERROR);
+        }
+
+        void write(const GRPCResult &, const CompletionCallback &) override
+        {
+            throw Exception("Responder<CALL_SIMPLE>::write() should not be called", ErrorCodes::LOGICAL_ERROR);
+        }
+
+        void writeAndFinish(const GRPCResult & result, const grpc::Status & status, const CompletionCallback & callback) override
+        {
+            response_writer.Finish(result, status, getCallbackPtr(callback));
+        }
+
+    private:
+        grpc::ServerAsyncResponseWriter<GRPCResult> response_writer{&grpc_context};
+        std::optional<GRPCQueryInfo> query_info;
+    };
+
+    template<>
+    class Responder<CALL_FETCH_PLAN_FRAGMENT_RESULT> : public BaseResponder
+    {
+    public:
+        void start(GRPCService & grpc_service,
+                   grpc::ServerCompletionQueue & new_call_queue,
+                   grpc::ServerCompletionQueue & notification_queue,
+                   const CompletionCallback & callback) override
+        {
+            grpc_service.RequestFetchPlanFragmentResult(&grpc_context, &ticket.emplace(), &writer, &new_call_queue, &notification_queue, getCallbackPtr(callback));
+        }
+
+        void read(GRPCQueryInfo &, const CompletionCallback &) override
+        {
+            throw Exception( "Responder<CALL_FRAGMENT_WITH_STREAM_OUTPUT>::read() should not be called", ErrorCodes::LOGICAL_ERROR);
+        }
+
+        void read(GRPCTicket & ticket_, const CompletionCallback & callback) override
+        {
+            if (!ticket.has_value())
+                callback(false);
+            ticket_ = std::move(ticket).value();
+            ticket.reset();
+            callback(true);
+        }
+
+        void write(const GRPCResult & result, const CompletionCallback & callback) override
+        {
+            writer.Write(result, getCallbackPtr(callback));
+        }
+
+        void writeAndFinish(const GRPCResult & result, const grpc::Status & status, const CompletionCallback & callback) override
+        {
+            writer.WriteAndFinish(result, {}, status, getCallbackPtr(callback));
+        }
+
+    private:
+        grpc::ServerAsyncWriter<GRPCResult> writer{&grpc_context};
+        std::optional<GRPCTicket> ticket;
+    };
+
+    template<>
+    class Responder<CALL_CANCEL_PLAN_FRAGMENT> : public BaseResponder
+    {
+    public:
+        void start(GRPCService & grpc_service,
+                   grpc::ServerCompletionQueue & new_call_queue,
+                   grpc::ServerCompletionQueue & notification_queue,
+                   const CompletionCallback & callback) override
+        {
+            grpc_service.RequestCancelPlanFragment(&grpc_context, &ticket.emplace(), &writer, &new_call_queue, &notification_queue, getCallbackPtr(callback));
+        }
+
+        void read(GRPCQueryInfo &, const CompletionCallback &) override
+        {
+            throw Exception("Responder<CALL_CANCEL_PLAN_FRAGMENT>::read() should not be called", ErrorCodes::LOGICAL_ERROR);
+        }
+
+        void read(GRPCTicket & ticket_, const CompletionCallback & callback) override
+        {
+            if (!ticket.has_value())
+                callback(false);
+            ticket_ = std::move(ticket).value();
+            ticket.reset();
+            callback(true);
+        }
+
+        void write(const GRPCResult &, const CompletionCallback &) override
+        {
+            throw Exception("Responder<CALL_CANCEL_PLAN_FRAGMENT>::write() should not be called", ErrorCodes::LOGICAL_ERROR);
+        }
+
+        void writeAndFinish(const GRPCResult & result, const grpc::Status & status, const CompletionCallback & callback) override
+        {
+            writer.Finish(result, status, getCallbackPtr(callback));
+        }
+
+    private:
+        grpc::ServerAsyncResponseWriter<GRPCResult> writer{&grpc_context};
+        std::optional<GRPCTicket> ticket;
+    };
+
     std::unique_ptr<BaseResponder> makeResponder(CallType call_type)
     {
         switch (call_type)
@@ -500,6 +656,9 @@ namespace
             case CALL_WITH_STREAM_INPUT: return std::make_unique<Responder<CALL_WITH_STREAM_INPUT>>();
             case CALL_WITH_STREAM_OUTPUT: return std::make_unique<Responder<CALL_WITH_STREAM_OUTPUT>>();
             case CALL_WITH_STREAM_IO: return std::make_unique<Responder<CALL_WITH_STREAM_IO>>();
+            case CALL_EXECUTE_PLAN_FRAGMENT: return std::make_unique<Responder<CALL_EXECUTE_PLAN_FRAGMENT>>();
+            case CALL_FETCH_PLAN_FRAGMENT_RESULT: return std::make_unique<Responder<CALL_FETCH_PLAN_FRAGMENT_RESULT>>();
+            case CALL_CANCEL_PLAN_FRAGMENT: return std::make_unique<Responder<CALL_CANCEL_PLAN_FRAGMENT>>();
             case CALL_MAX: break;
         }
         __builtin_unreachable();
@@ -562,12 +721,214 @@ namespace
         mutable std::condition_variable changed;
     };
 
+    template <class Value>
+    class InnerMap
+    {
+    public:
+        InnerMap(String name): log(&Poco::Logger::get(name)) {}
+
+        using Impl = std::unordered_map<String, Value>;
+        auto get(const String & key_)
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            auto it = container.find(key_);
+            if (it == container.end())
+                return std::pair<Value, bool>{{}, false};
+            return std::pair<Value, bool>{it->second, true};
+        }
+
+        auto insert(const String & key_, Value && value_)
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            return container.emplace(key_, value_);
+        }
+
+        auto erase(const String & key_)
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            return container.erase(key_);
+        }
+
+        using Callback = bool(*)(const Value & it, const std::chrono::time_point<std::chrono::steady_clock> & now);
+        void eraseAll(Callback callback, const std::chrono::time_point<std::chrono::steady_clock> & now)
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            for (auto it = container.begin(); it != container.end();)
+            {
+                if (callback(it->second, now))
+                {
+                    LOG_DEBUG(log, "Clean entry for key {}", it->first);
+                    container.erase(it++);
+                }
+                else
+                    ++it;
+            }
+        }
+
+    private:
+        Impl container;
+        std::mutex mutex;
+        Poco::Logger * log = nullptr;
+    };
+
+    class QueryInfoWrapper
+    {
+    public:
+        enum Status {
+            NORMAL,
+            TIMEOUT,
+            FINISH,
+            CANCEL
+        };
+
+        QueryInfoWrapper(const std::shared_ptr<GRPCQueryInfo> & query_info_, int consumers_)
+            : query_info(query_info_), consumers(consumers_), blocks(consumers), ready(consumers, false), ready_count(0)
+        {
+        }
+
+        void setWaitTimeoutSeconds(int wait_timeout_seconds_)
+        {
+            if (wait_timeout_seconds_ > 0)
+                wait_timeout_seconds = std::chrono::seconds(wait_timeout_seconds_);
+        }
+
+        void notifyHeader(Block header_);
+        QueryInfoWrapper::Status waitConsume();
+        void notifyReady();
+        void notifyFinish();
+
+        QueryInfoWrapper::Status waitHeader();
+        QueryInfoWrapper::Status waitReadyOrFinish(int index);
+        void notifyProduce();
+
+        std::shared_ptr<GRPCQueryInfo> query_info;
+        int consumers;
+
+        /// Transferred data between producer and consumer.
+        /// Not need to lock when accessing "blocks", because:
+        /// 1. producer will put blocks until all consumers take blocks out, so there is no READ when WRITE.
+        /// 2. consumers could take blocks simultaneously, as it's a vector which supports READ concurrently.
+        Block header;
+        std::vector<Block> blocks;
+        Block totals;
+        Block extremes;
+        ProfileInfo profile_info;
+
+        /// Consumer wait condition.
+        std::mutex mutex_consumer;
+        std::condition_variable cv_consumer;
+        std::vector<bool> ready;
+
+        /// Producer wait condition.
+        std::mutex mutex_producer;
+        std::condition_variable cv_producer;
+        int ready_count;
+
+        std::atomic<bool> finish{false};
+        std::atomic<bool> cancel{false};
+        std::chrono::seconds wait_timeout_seconds{600};
+    };
+
+    void QueryInfoWrapper::notifyHeader(Block header_)
+    {
+        {
+            std::lock_guard<std::mutex> lock(mutex_consumer);
+            header = std::move(header_);
+        }
+        cv_consumer.notify_all();
+    }
+
+    QueryInfoWrapper::Status QueryInfoWrapper::waitConsume()
+    {
+        std::unique_lock<std::mutex> lock(mutex_producer);
+        bool status = cv_producer.wait_for(lock, wait_timeout_seconds, [this] { return ready_count == 0 || cancel; });
+        if (!status)
+        {
+            /// Set cancel if timeout.
+            cancel = true;
+            return Status::CANCEL;
+        }
+        ready_count = consumers;
+        return Status::NORMAL;
+    }
+
+    void QueryInfoWrapper::notifyReady()
+    {
+        {
+            std::lock_guard<std::mutex> lock(mutex_consumer);
+            ready.assign(consumers, true);
+        }
+        cv_consumer.notify_all();
+    }
+
+    void QueryInfoWrapper::notifyFinish()
+    {
+        {
+            std::lock_guard<std::mutex> lock(mutex_consumer);
+            finish = true;
+        }
+        cv_consumer.notify_all();
+    }
+
+    QueryInfoWrapper::Status QueryInfoWrapper::waitHeader()
+    {
+        std::unique_lock<std::mutex> lock(mutex_consumer);
+        bool status = cv_consumer.wait_for(lock, wait_timeout_seconds,[this] { return header == true || cancel; });
+        if (!status)
+            return Status::TIMEOUT;
+        return Status::NORMAL;
+    }
+
+    QueryInfoWrapper::Status QueryInfoWrapper::waitReadyOrFinish(int index)
+    {
+        std::unique_lock<std::mutex> lock(mutex_consumer);
+        bool status = cv_consumer.wait_for(
+            lock, wait_timeout_seconds, [this, index] { return ready[index] || finish || cancel; });
+        if (!status)
+            return Status::TIMEOUT;
+        if (finish)
+            return Status::FINISH;
+        if (cancel)
+            return Status::CANCEL;
+        ready[index] = false;
+        return Status::NORMAL;
+    }
+
+    void QueryInfoWrapper::notifyProduce()
+    {
+        int res = 0;
+        {
+            std::lock_guard<std::mutex> lock(mutex_producer);
+            res = --ready_count;
+        }
+        /// Notify producer only when all blocks are consumed, producer will be waken up once.
+        if (res == 0)
+            cv_producer.notify_one();
+    }
+
+    using QueryInfoWrapperMap = InnerMap<std::shared_ptr<QueryInfoWrapper>>;
+
+    class ExceptionWrapper
+    {
+    public:
+        ExceptionWrapper(const Exception & exception_, const std::chrono::time_point<std::chrono::steady_clock> & timestamp_)
+        : exception(exception_), timestamp(timestamp_) {}
+        Exception exception;
+        std::chrono::time_point<std::chrono::steady_clock> timestamp;
+    };
+    using ExceptionWrapperMap = InnerMap<std::shared_ptr<ExceptionWrapper>>;
 
     /// Handles a connection after a responder is started (i.e. after getting a new call).
     class Call
     {
     public:
-        Call(CallType call_type_, std::unique_ptr<BaseResponder> responder_, IServer & iserver_, Poco::Logger * log_);
+        Call(
+            CallType call_type_,
+            std::unique_ptr<BaseResponder> responder_,
+            IServer & iserver_,
+            std::shared_ptr<QueryInfoWrapperMap> & query_info_map,
+            std::shared_ptr<ExceptionWrapperMap> & exception_map,
+            Poco::Logger * log_);
         ~Call();
 
         void start(const std::function<void(void)> & on_finish_call_callback);
@@ -576,22 +937,33 @@ namespace
         void run();
 
         void receiveQuery();
+        void receiveTicket();
         void executeQuery();
+
+        void storeQueryInfoWrapper();
+        void loadQueryInfoWrapper(bool is_cancel = false);
 
         void processInput();
         void initializeBlockInputStream(const Block & header);
         void createExternalTables();
 
         void generateOutput();
+        void produceOutput();
+        void consumeOutput();
+        void cancelPlanFragment();
 
         void finishQuery();
+        void finishQueryInfo();
+        void finishPipeline();
         void onException(const Exception & exception);
         void onFatalError();
         void releaseQueryIDAndSessionID();
         void close();
 
         void readQueryInfo();
+        void readTicket();
         void throwIfFailedToReadQueryInfo();
+        void throwIfFailedToReadTicket();
         bool isQueryCancelled();
 
         void addProgressToResult();
@@ -606,6 +978,10 @@ namespace
         const CallType call_type;
         std::unique_ptr<BaseResponder> responder;
         IServer & iserver;
+        std::shared_ptr<QueryInfoWrapperMap> & query_info_map;
+        String query_info_key;
+        std::shared_ptr<QueryInfoWrapper> query_info_wrapper;
+        std::shared_ptr<ExceptionWrapperMap> & exception_map;
         Poco::Logger * log = nullptr;
 
         std::optional<Session> session;
@@ -625,10 +1001,12 @@ namespace
         Progress progress;
         InternalTextLogsQueuePtr logs_queue;
 
-        GRPCQueryInfo query_info; /// We reuse the same messages multiple times.
+        std::shared_ptr<GRPCQueryInfo> query_info; /// We reuse the same messages multiple times.
         GRPCResult result;
+        GRPCTicket ticket;
 
         bool initial_query_info_read = false;
+        bool initial_ticket_read = false;
         bool finalize = false;
         bool responder_finished = false;
         bool cancelled = false;
@@ -648,8 +1026,11 @@ namespace
 
         /// The following fields are accessed both from call_thread and queue_thread.
         BoolState reading_query_info{false};
+        BoolState reading_ticket{false};
         std::atomic<bool> failed_to_read_query_info = false;
-        GRPCQueryInfo next_query_info_while_reading;
+        std::atomic<bool> failed_to_read_ticket = false;
+        std::shared_ptr<GRPCQueryInfo> next_query_info_while_reading;
+        GRPCTicket next_ticket_while_reading;
         std::atomic<bool> want_to_cancel = false;
         std::atomic<bool> check_query_info_contains_cancel_only = false;
         BoolState sending_result{false};
@@ -658,8 +1039,19 @@ namespace
         ThreadFromGlobalPool call_thread;
     };
 
-    Call::Call(CallType call_type_, std::unique_ptr<BaseResponder> responder_, IServer & iserver_, Poco::Logger * log_)
-        : call_type(call_type_), responder(std::move(responder_)), iserver(iserver_), log(log_)
+    Call::Call(
+        CallType call_type_,
+        std::unique_ptr<BaseResponder> responder_,
+        IServer & iserver_,
+        std::shared_ptr<QueryInfoWrapperMap> & query_info_map_,
+        std::shared_ptr<ExceptionWrapperMap> & exception_map_,
+        Poco::Logger * log_)
+        : call_type(call_type_)
+        , responder(std::move(responder_))
+        , iserver(iserver_)
+        , query_info_map(query_info_map_)
+        , exception_map(exception_map_)
+        , log(log_)
     {
     }
 
@@ -690,12 +1082,48 @@ namespace
     {
         try
         {
-            setThreadName("GRPCServerCall");
-            receiveQuery();
-            executeQuery();
-            processInput();
-            generateOutput();
-            finishQuery();
+            if (call_type == CALL_EXECUTE_PLAN_FRAGMENT)
+            {
+                setThreadName("GRPCExecPlan");
+
+                /// Include two steps:
+                /// 1.Store query info.
+                receiveQuery();
+                storeQueryInfoWrapper();
+                finishQueryInfo();
+
+                /// 2.Build and execute pipeline.
+                executeQuery(); /// Build pipeline.
+                produceOutput(); /// Execute pipeline.
+                finishPipeline();
+            }
+            else if (call_type == CALL_FETCH_PLAN_FRAGMENT_RESULT)
+            {
+                setThreadName("GRPCFetchResult");
+                receiveTicket();
+                loadQueryInfoWrapper();
+                executeQuery();
+                consumeOutput();
+                finishQuery();
+            }
+            else if (call_type == CALL_CANCEL_PLAN_FRAGMENT)
+            {
+                setThreadName("GRPCCancelPlan");
+                receiveTicket();
+                loadQueryInfoWrapper(true);
+                if (query_info_wrapper)
+                    cancelPlanFragment();
+                finishQuery();
+            }
+            else
+            {
+                setThreadName("GRPCServerCall");
+                receiveQuery();
+                executeQuery();
+                processInput();
+                generateOutput();
+                finishQuery();
+            }
         }
         catch (Exception & exception)
         {
@@ -717,18 +1145,32 @@ namespace
 
         readQueryInfo();
 
-        if (query_info.cancel())
+        if (query_info->cancel())
             throw Exception("Initial query info cannot set the 'cancel' field", ErrorCodes::INVALID_GRPC_QUERY_INFO);
 
-        LOG_DEBUG(log, "Received initial QueryInfo: {}", getQueryDescription(query_info));
+        LOG_DEBUG(log, "Received initial QueryInfo: {}", getQueryDescription(*query_info));
+    }
+
+    void Call::receiveTicket()
+    {
+        LOG_INFO(log, "Handling call {}", getCallName(call_type));
+
+        readTicket();
+
+        LOG_DEBUG(log, "Received ticket: {}", ticket.initial_query_id() + "/" + std::to_string(ticket.stage_id()) + "|" + ticket.node_id());
     }
 
     void Call::executeQuery()
     {
+        /// If this is from fetchPlanFragmentResult(), restore query_info from wrapper,
+        /// and initialize query_context, but don't build pipeline.
+        if (call_type == CALL_FETCH_PLAN_FRAGMENT_RESULT)
+            query_info = query_info_wrapper->query_info;
+
         /// Retrieve user credentials.
-        std::string user = query_info.user_name();
-        std::string password = query_info.password();
-        std::string quota_key = query_info.quota();
+        std::string user = query_info->user_name();
+        std::string password = query_info->password();
+        std::string quota_key = query_info->quota();
         Poco::Net::SocketAddress user_address = responder->getClientAddress();
 
         if (user.empty())
@@ -744,24 +1186,52 @@ namespace
 
         /// The user could specify session identifier and session timeout.
         /// It allows to modify settings, create temporary tables and reuse them in subsequent requests.
-        if (!query_info.session_id().empty())
+        if (!query_info->session_id().empty())
         {
             session->makeSessionContext(
-                query_info.session_id(), getSessionTimeout(query_info, iserver.config()), query_info.session_check());
+                query_info->session_id(), getSessionTimeout(*query_info, iserver.config()), query_info->session_check());
         }
 
         query_context = session->makeQueryContext();
 
+        /// Set query plan fragment info
+        if (call_type == CALL_EXECUTE_PLAN_FRAGMENT)
+        {
+            std::unordered_map<int, std::vector<std::shared_ptr<String>>> parent_sources;
+            for (const auto & parent : query_info->parent_sources())
+            {
+                std::vector<std::shared_ptr<String>> sources;
+                for (const auto & source : parent.second.sources())
+                    sources.emplace_back(std::make_shared<String>(source));
+                parent_sources[parent.first] = std::move(sources);
+            }
+            std::vector<std::shared_ptr<String>> sinks;
+            for (const auto & sink : query_info->sinks())
+            {
+                sinks.emplace_back(std::make_shared<String>(sink));
+            }
+            Context::QueryPlanFragmentInfo fragment_info{
+                .initial_query_id = query_info->initial_query_id(),
+                .stage_id = query_info->stage_id(),
+                .node_id = query_info->node_id(),
+                .parent_sources = std::move(parent_sources),
+                .sinks = sinks,
+                .empty_result_for_aggregation_by_empty_set = query_info->empty_result_for_aggregation_by_empty_set()};
+            query_context->setQueryPlanFragmentInfo(std::move(fragment_info));
+        }
+
         /// Prepare settings.
         SettingsChanges settings_changes;
-        for (const auto & [key, value] : query_info.settings())
+        for (const auto & [key, value] : query_info->settings())
         {
             settings_changes.push_back({key, value});
         }
         query_context->checkSettingsConstraints(settings_changes);
         query_context->applySettingsChanges(settings_changes);
 
-        query_context->setCurrentQueryId(query_info.query_id());
+        query_context->getClientInfo().query_kind = ClientInfo::QueryKind(query_info->query_kind());
+        query_context->getClientInfo().initial_query_id = query_info->initial_query_id();
+        query_context->setCurrentQueryId(query_info->query_id());
         query_scope.emplace(query_context);
 
         /// Prepare for sending exceptions and logs.
@@ -777,19 +1247,26 @@ namespace
         }
 
         /// Set the current database if specified.
-        if (!query_info.database().empty())
-            query_context->setCurrentDatabase(query_info.database());
+        if (!query_info->database().empty())
+            query_context->setCurrentDatabase(query_info->database());
 
         /// Apply compression settings for this call.
-        if (query_info.has_result_compression())
-            responder->setResultCompression(query_info.result_compression());
+        if (query_info->has_result_compression())
+            responder->setResultCompression(query_info->result_compression());
 
         /// The interactive delay will be used to show progress.
         interactive_delay = settings.interactive_delay;
         query_context->setProgressCallback([this](const Progress & value) { return progress.incrementPiecewiseAtomically(value); });
 
+        if (call_type == CALL_FETCH_PLAN_FRAGMENT_RESULT)
+        {
+            query_context->setDefaultFormat("Native");
+            output_format = "Native";
+            return;
+        }
+
         /// Parse the query.
-        query_text = std::move(*(query_info.mutable_query()));
+        query_text = std::move(*(query_info->mutable_query()));
         const char * begin = query_text.data();
         const char * end = begin + query_text.size();
         ParserQuery parser(end);
@@ -804,10 +1281,10 @@ namespace
                 input_format = "Values";
         }
 
-        input_data_delimiter = query_info.input_data_delimiter();
+        input_data_delimiter = query_info->input_data_delimiter();
 
         /// Choose output format.
-        query_context->setDefaultFormat(query_info.output_format());
+        query_context->setDefaultFormat(query_info->output_format());
         if (const auto * ast_query_with_output = dynamic_cast<const ASTQueryWithOutput *>(ast.get());
             ast_query_with_output && ast_query_with_output->format)
         {
@@ -824,25 +1301,53 @@ namespace
             createExternalTables();
         });
 
-        /// Set callbacks to execute function input().
-        query_context->setInputInitializer([this] (ContextPtr context, const StoragePtr & input_storage)
+        if (call_type == CALL_EXECUTE_PLAN_FRAGMENT)
         {
-            if (context != query_context)
-                throw Exception("Unexpected context in Input initializer", ErrorCodes::LOGICAL_ERROR);
-            input_function_is_used = true;
-            initializeBlockInputStream(input_storage->getInMemoryMetadataPtr()->getSampleBlock());
-        });
+            const String & plan_fragment_id
+                = query_info->initial_query_id() + "/" + toString(query_info->stage_id()) + "/" + query_info->node_id();
 
-        query_context->setInputBlocksReaderCallback([this](ContextPtr context) -> Block
+            if (query_info->has_view_source() || query_info->has_input_function())
+            {
+                const auto & initial_context = query_context->getInitialContext(plan_fragment_id);
+                if (query_info->has_view_source())
+                {
+                    const auto & view_source = initial_context->getViewSource();
+                    assert(view_source);
+                    LOG_DEBUG(
+                        log,
+                        "Restore view source {}({}) for plan fragment {}",
+                        view_source->getStorageID().getFullNameNotQuoted(),
+                        view_source->getName(),
+                        plan_fragment_id);
+                    query_context->addViewSource(view_source);
+                }
+                else if (query_info->has_input_function())
+                {
+                    query_context->setQueryContext(std::const_pointer_cast<Context>(initial_context));
+                }
+            }
+        }
+        else
         {
-            if (context != query_context)
-                throw Exception("Unexpected context in InputBlocksReader", ErrorCodes::LOGICAL_ERROR);
+            /// Set callbacks to execute function input().
+            query_context->setInputInitializer([this](ContextPtr context, const StoragePtr & input_storage) {
+                if (context != query_context)
+                    throw Exception("Unexpected context in Input initializer", ErrorCodes::LOGICAL_ERROR);
+                input_function_is_used = true;
+                initializeBlockInputStream(input_storage->getInMemoryMetadataPtr()->getSampleBlock());
+            });
 
-            Block block;
-            while (!block && pipeline_executor->pull(block));
+            query_context->setInputBlocksReaderCallback([this](ContextPtr context) -> Block {
+                if (context != query_context)
+                    throw Exception("Unexpected context in InputBlocksReader", ErrorCodes::LOGICAL_ERROR);
 
-            return block;
-        });
+                Block block;
+                while (!block && pipeline_executor->pull(block))
+                    ;
+
+                return block;
+            });
+        }
 
         /// Start executing the query.
         const auto * query_end = end;
@@ -854,13 +1359,51 @@ namespace
         io = ::DB::executeQuery(true, query, query_context);
     }
 
+    void Call::storeQueryInfoWrapper()
+    {
+        query_info_key = query_info->initial_query_id() + "/" + toString(query_info->stage_id());
+        auto res = query_info_map->insert(query_info_key, std::make_shared<QueryInfoWrapper>(query_info, query_info->sinks_size()));
+        if (!res.second)
+        {
+            throw Exception("Query info key " + query_info_key + " already exists", ErrorCodes::LOGICAL_ERROR);
+        }
+        query_info_wrapper = res.first->second;
+        LOG_DEBUG(log, "Store query info key {}", query_info_key);
+    }
+
+    void Call::loadQueryInfoWrapper(bool is_cancel)
+    {
+        query_info_key = ticket.initial_query_id() + "/" + std::to_string(ticket.stage_id());
+        auto res = query_info_map->get(query_info_key);
+        if (res.second)
+        {
+            query_info_wrapper = res.first;
+            LOG_DEBUG(log, "Load query info key {} to {}", query_info_key, ticket.node_id());
+        }
+        else
+        {
+            const auto & check_exception_result = exception_map->get(query_info_key);
+            if (check_exception_result.second)
+            {
+                LOG_WARNING(log, "Query info key {} not found, and catch exception from producer.", query_info_key);
+                throw Exception(check_exception_result.first->exception);
+            }
+
+            if (is_cancel) /// Plan fragment maybe done.
+                LOG_INFO(log, "Query info key {} to be cancelled does not exist, so ignore it.", query_info_key);
+            else
+                throw Exception("Query info key " + query_info_key + " not exists", ErrorCodes::LOGICAL_ERROR);
+        }
+
+    }
+
     void Call::processInput()
     {
         if (!io.pipeline.pushing())
             return;
 
         bool has_data_to_insert = (insert_query && insert_query->data)
-                                  || !query_info.input_data().empty() || query_info.next_query_info();
+                                  || !query_info->input_data().empty() || query_info->next_query_info();
         if (!has_data_to_insert)
         {
             if (!insert_query)
@@ -905,30 +1448,30 @@ namespace
             {
                 if (need_input_data_from_query_info)
                 {
-                    if (need_input_data_delimiter && !query_info.input_data().empty())
+                    if (need_input_data_delimiter && !query_info->input_data().empty())
                     {
                         need_input_data_delimiter = false;
                         return {input_data_delimiter.data(), input_data_delimiter.size()};
                     }
                     need_input_data_from_query_info = false;
-                    if (!query_info.input_data().empty())
+                    if (!query_info->input_data().empty())
                     {
                         need_input_data_delimiter = !input_data_delimiter.empty();
-                        return {query_info.input_data().data(), query_info.input_data().size()};
+                        return {query_info->input_data().data(), query_info->input_data().size()};
                     }
                 }
 
-                if (!query_info.next_query_info())
+                if (!query_info->next_query_info())
                     break;
 
                 if (!isInputStreaming(call_type))
                     throw Exception("next_query_info is allowed to be set only for streaming input", ErrorCodes::INVALID_GRPC_QUERY_INFO);
 
                 readQueryInfo();
-                if (!query_info.query().empty() || !query_info.query_id().empty() || !query_info.settings().empty()
-                    || !query_info.database().empty() || !query_info.input_data_delimiter().empty() || !query_info.output_format().empty()
-                    || query_info.external_tables_size() || !query_info.user_name().empty() || !query_info.password().empty()
-                    || !query_info.quota().empty() || !query_info.session_id().empty())
+                if (!query_info->query().empty() || !query_info->query_id().empty() || !query_info->settings().empty()
+                    || !query_info->database().empty() || !query_info->input_data_delimiter().empty() || !query_info->output_format().empty()
+                    || query_info->external_tables_size() || !query_info->user_name().empty() || !query_info->password().empty()
+                    || !query_info->quota().empty() || !query_info->session_id().empty())
                 {
                     throw Exception("Extra query infos can be used only to add more input data. "
                                     "Only the following fields can be set: input_data, next_query_info, cancel",
@@ -938,7 +1481,7 @@ namespace
                 if (isQueryCancelled())
                     break;
 
-                LOG_DEBUG(log, "Received extra QueryInfo: input_data: {} bytes", query_info.input_data().size());
+                LOG_DEBUG(log, "Received extra QueryInfo: input_data: {} bytes", query_info->input_data().size());
                 need_input_data_from_query_info = true;
             }
 
@@ -980,7 +1523,7 @@ namespace
     {
         while (true)
         {
-            for (const auto & external_table : query_info.external_tables())
+            for (const auto & external_table : query_info->external_tables())
             {
                 String name = external_table.name();
                 if (name.empty())
@@ -1010,6 +1553,7 @@ namespace
                     auto temporary_table = TemporaryTableHolder(query_context, ColumnsDescription{columns}, {});
                     storage = temporary_table.getTable();
                     query_context->addExternalTable(temporary_id.table_name, std::move(temporary_table));
+                    LOG_DEBUG(log, "Add external table {} to context {}", temporary_id.table_name, static_cast<void*>(query_context.get()));
                 }
 
                 if (!external_table.data().empty())
@@ -1050,24 +1594,24 @@ namespace
                 }
             }
 
-            if (!query_info.input_data().empty())
+            if (!query_info->input_data().empty())
             {
                 /// External tables must be created before executing query,
                 /// so all external tables must be send no later sending any input data.
                 break;
             }
 
-            if (!query_info.next_query_info())
+            if (!query_info->next_query_info())
                 break;
 
             if (!isInputStreaming(call_type))
                 throw Exception("next_query_info is allowed to be set only for streaming input", ErrorCodes::INVALID_GRPC_QUERY_INFO);
 
             readQueryInfo();
-            if (!query_info.query().empty() || !query_info.query_id().empty() || !query_info.settings().empty()
-                || !query_info.database().empty() || !query_info.input_data_delimiter().empty()
-                || !query_info.output_format().empty() || !query_info.user_name().empty() || !query_info.password().empty()
-                || !query_info.quota().empty() || !query_info.session_id().empty())
+            if (!query_info->query().empty() || !query_info->query_id().empty() || !query_info->settings().empty()
+                || !query_info->database().empty() || !query_info->input_data_delimiter().empty()
+                || !query_info->output_format().empty() || !query_info->user_name().empty() || !query_info->password().empty()
+                || !query_info->quota().empty() || !query_info->session_id().empty())
             {
                 throw Exception("Extra query infos can be used only to add more data to input or more external tables. "
                                 "Only the following fields can be set: input_data, external_tables, next_query_info, cancel",
@@ -1075,7 +1619,7 @@ namespace
             }
             if (isQueryCancelled())
                 break;
-            LOG_DEBUG(log, "Received extra QueryInfo: external tables: {}", query_info.external_tables_size());
+            LOG_DEBUG(log, "Received extra QueryInfo: external tables: {}", query_info->external_tables_size());
         }
     }
 
@@ -1172,12 +1716,156 @@ namespace
         output_format_processor->doWriteSuffix();
     }
 
+    void Call::produceOutput()
+    {
+        if (!io.pipeline.initialized() || io.pipeline.pushing())
+            return;
+
+        if (io.pipeline.pulling())
+        {
+            query_info_wrapper->setWaitTimeoutSeconds(query_context->getSettings().max_execution_time.totalSeconds());
+            query_info_wrapper->notifyHeader(io.pipeline.getHeader());
+
+            /// Pull block from pipeline.
+            auto executor = std::make_shared<PullingPipelineExecutor>(io.pipeline);
+            auto check_for_cancel = [this, &executor] {
+                if (query_info_wrapper->cancel)
+                {
+                    result.set_cancelled(true);
+                    cancelled = true;
+                    LOG_DEBUG(log, "{} producer cancel pipeline executor.", query_info_key);
+                    executor->cancel();
+                    return false;
+                }
+                return true;
+            };
+
+            Block block;
+            while (check_for_cancel())
+            {
+                if (!executor->pull(block))
+                    break;
+
+                if (!check_for_cancel())
+                    break;
+
+                if (block && !io.null_format)
+                {
+                    block = materializeBlock(block);
+                    query_info_wrapper->waitConsume();
+                    if (!check_for_cancel())
+                        break;
+                    query_info_wrapper->blocks.assign(query_info_wrapper->consumers, block);
+                    LOG_DEBUG(log, "{} produce {} block(s): {} rows, {} columns, {} bytes.", query_info_key, query_info_wrapper->consumers, block.rows(), block.columns(), block.bytes());
+                    query_info_wrapper->notifyReady();
+                }
+            }
+
+            /// Wait the last produced blocks to be consumed.
+            if (!query_info_wrapper->cancel)
+                query_info_wrapper->waitConsume();
+
+            if (!query_info_wrapper->cancel)
+            {
+                query_info_wrapper->totals = executor->getTotalsBlock();
+                query_info_wrapper->extremes = executor->getExtremesBlock();
+                query_info_wrapper->profile_info = executor->getProfileInfo();
+                LOG_DEBUG(log, "{} produce totals {}, extremes {}.", query_info_key, query_info_wrapper->totals.rows(), query_info_wrapper->extremes.rows());
+            }
+            query_info_wrapper->notifyFinish();
+        }
+    }
+
+    void Call::consumeOutput()
+    {
+        int index = 0;
+        for (; index < query_info_wrapper->query_info->sinks().size(); ++index)
+        {
+            if (query_info_wrapper->query_info->sinks(index) == ticket.node_id())
+                break;
+        }
+
+        while (query_info_wrapper->waitHeader() == QueryInfoWrapper::Status::TIMEOUT);
+
+        write_buffer.emplace(*result.mutable_output());
+        output_format_processor = query_context->getOutputFormat(output_format, *write_buffer, query_info_wrapper->header);
+        output_format_processor->doWritePrefix();
+        Stopwatch after_send_progress;
+
+        /// Unless the input() function is used we are not going to receive input data anymore.
+        if (!input_function_is_used)
+            check_query_info_contains_cancel_only = true;
+
+        Block block;
+        while (!query_info_wrapper->cancel)
+        {
+            auto status = query_info_wrapper->waitReadyOrFinish(index);
+            if (status == QueryInfoWrapper::Status::TIMEOUT)
+                continue;
+            if (query_info_wrapper->finish || query_info_wrapper->cancel)
+                break;
+
+            block = query_info_wrapper->blocks[index];
+            LOG_DEBUG(log, "{}|{} consume 1 block: {} rows, {} columns, {} bytes.", query_info_key, ticket.node_id(), block.rows(), block.columns(), block.bytes());
+            query_info_wrapper->notifyProduce();
+
+            throwIfFailedToSendResult();
+            if (query_info_wrapper->cancel)
+                break;
+
+            if (block && !io.null_format)
+                output_format_processor->write(block);
+
+            if (after_send_progress.elapsedMicroseconds() >= interactive_delay)
+            {
+                addProgressToResult();
+                after_send_progress.restart();
+            }
+
+            addLogsToResult();
+
+            bool has_output = write_buffer->offset();
+            if (has_output || result.has_progress() || result.logs_size())
+                sendResult();
+
+            throwIfFailedToSendResult();
+        }
+
+        /// Throw exception which is from producer.
+        const auto & check_exception_result = exception_map->get(query_info_key);
+        if (check_exception_result.second)
+            throw Exception(check_exception_result.first->exception);
+
+        if (!query_info_wrapper->cancel)
+        {
+            LOG_DEBUG(log, "{}|{} consume totals {}, extremes {}.", query_info_key, ticket.node_id(), query_info_wrapper->totals.rows(), query_info_wrapper->extremes.rows());
+            addTotalsToResult(query_info_wrapper->totals);
+            addExtremesToResult(query_info_wrapper->extremes);
+            addProfileInfoToResult(query_info_wrapper->profile_info);
+        }
+
+        output_format_processor->doWriteSuffix();
+        /// Notify producer that current consumer is finished.
+        query_info_wrapper->notifyProduce();
+        LOG_DEBUG(log, "{}|{} consumer is {}.", query_info_key, ticket.node_id(), (query_info_wrapper->cancel ? "cancelled" : "done"));
+    }
+
+    void Call::cancelPlanFragment()
+    {
+        /// Cancel plan fragment, including producer and consumer.
+        query_info_wrapper->cancel = true;
+        result.set_cancelled(true);
+    }
+
     void Call::finishQuery()
     {
         finalize = true;
         io.onFinish();
         addProgressToResult();
-        query_scope->logPeakMemoryUsage();
+        if (query_scope.has_value())
+        {
+            query_scope->logPeakMemoryUsage();
+        }
         addLogsToResult();
         releaseQueryIDAndSessionID();
         sendResult();
@@ -1192,8 +1880,51 @@ namespace
             static_cast<double>(waited_for_client_writing) / 1000000000ULL);
     }
 
+    void Call::finishQueryInfo()
+    {
+        finalize = true;
+        addProgressToResult();
+        if (query_scope.has_value())
+        {
+            query_scope->logPeakMemoryUsage();
+        }
+        addLogsToResult();
+        releaseQueryIDAndSessionID();
+        sendResult();
+        LOG_INFO(
+            log,
+            "Finished receiving query info in {} secs. (including reading by client: {}, writing by client: {})",
+            query_time.elapsedSeconds(),
+            static_cast<double>(waited_for_client_reading) / 1000000000ULL,
+            static_cast<double>(waited_for_client_writing) / 1000000000ULL);
+    }
+
+    void Call::finishPipeline()
+    {
+        io.onFinish();
+        close();
+        LOG_INFO(
+            log,
+            "Finished executing pipeline of plan fragment {} in {} secs.",
+            query_info_key, query_time.elapsedSeconds());
+    }
+
     void Call::onException(const Exception & exception)
     {
+        if (call_type == CALL_EXECUTE_PLAN_FRAGMENT)
+        {
+            if (query_info_wrapper)
+            {
+                LOG_DEBUG(log, "{} producer has an exception", query_info_key);
+                auto const & now = std::chrono::steady_clock::now();
+                auto exception_wrapper = std::make_shared<ExceptionWrapper>(exception, now);
+                exception_map->insert(query_info_key, std::move(exception_wrapper));
+
+                cancelPlanFragment();
+                query_info_wrapper->notifyFinish();
+            }
+        }
+
         io.onException();
 
         LOG_ERROR(log, getExceptionMessage(exception, true));
@@ -1264,6 +1995,16 @@ namespace
         query_scope.reset();
         query_context.reset();
         session.reset();
+        if (call_type == CALL_EXECUTE_PLAN_FRAGMENT && !query_info_key.empty())
+        {
+            if (query_info_wrapper)
+            {
+                /// Wait all consumers to finish.
+                query_info_wrapper->waitConsume();
+                LOG_DEBUG(log, "{} producer is {}.", query_info_key, (query_info_wrapper->cancel ? "cancelled" : "done"));
+            }
+            query_info_map->erase(query_info_key);
+        }
     }
 
     void Call::readQueryInfo()
@@ -1271,12 +2012,13 @@ namespace
         auto start_reading = [&]
         {
             reading_query_info.set(true);
-            responder->read(next_query_info_while_reading, [this](bool ok)
+            next_query_info_while_reading = std::make_shared<GRPCQueryInfo>();
+            responder->read(*next_query_info_while_reading, [this](bool ok)
             {
                 /// Called on queue_thread.
                 if (ok)
                 {
-                    const auto & nqi = next_query_info_while_reading;
+                    const auto & nqi = *next_query_info_while_reading;
                     if (check_query_info_contains_cancel_only)
                     {
                         if (!nqi.query().empty() || !nqi.query_id().empty() || !nqi.settings().empty() || !nqi.database().empty()
@@ -1308,7 +2050,7 @@ namespace
                 waited_for_client_writing += client_writing_watch.elapsedNanoseconds();
             }
             throwIfFailedToReadQueryInfo();
-            query_info = std::move(next_query_info_while_reading);
+            query_info = next_query_info_while_reading;
             initial_query_info_read = true;
         };
 
@@ -1329,6 +2071,41 @@ namespace
         }
     }
 
+    void Call::readTicket()
+    {
+        auto start_reading = [&]
+        {
+            reading_ticket.set(true);
+            responder->read(next_ticket_while_reading, [this](bool ok)
+            {
+                /// Called on queue_thread.
+                if (!ok)
+                {
+                    failed_to_read_ticket = true;
+                }
+                reading_ticket.set(false);
+            });
+        };
+        auto finish_reading = [&]
+        {
+            if (reading_ticket.get())
+            {
+                Stopwatch client_writing_watch;
+                reading_ticket.wait(false);
+                waited_for_client_writing += client_writing_watch.elapsedNanoseconds();
+            }
+            throwIfFailedToReadTicket();
+            ticket = std::move(next_ticket_while_reading);
+            initial_ticket_read = true;
+        };
+        if (!initial_ticket_read)
+        {
+            start_reading();
+        }
+
+        finish_reading();
+    }
+
     void Call::throwIfFailedToReadQueryInfo()
     {
         if (failed_to_read_query_info)
@@ -1337,6 +2114,14 @@ namespace
                 throw Exception("Failed to read extra QueryInfo", ErrorCodes::NETWORK_ERROR);
             else
                 throw Exception("Failed to read initial QueryInfo", ErrorCodes::NETWORK_ERROR);
+        }
+    }
+
+    void Call::throwIfFailedToReadTicket()
+    {
+        if (failed_to_read_ticket)
+        {
+            throw Exception("Failed to read  Ticket", ErrorCodes::NETWORK_ERROR);
         }
     }
 
@@ -1536,12 +2321,19 @@ namespace
 class GRPCServer::Runner
 {
 public:
-    explicit Runner(GRPCServer & owner_) : owner(owner_) {}
+    explicit Runner(GRPCServer & owner_) : owner(owner_)
+    {
+        query_info_map = std::make_shared<QueryInfoWrapperMap>("QueryInfoWrapperMap");
+        exception_map = std::make_shared<ExceptionWrapperMap>("ExceptionWrapperMap");
+    }
 
     ~Runner()
     {
         if (queue_thread.joinable())
             queue_thread.join();
+
+        if (clean_thread.joinable())
+            clean_thread.join();
     }
 
     void start()
@@ -1561,6 +2353,19 @@ public:
             }
         };
         queue_thread = ThreadFromGlobalPool{runner_function};
+
+        auto cleanner_function = [this]
+        {
+            try
+            {
+                clean();
+            }
+            catch (...)
+            {
+                tryLogCurrentException("GRPCServer");
+            }
+        };
+        clean_thread = ThreadFromGlobalPool{cleanner_function};
     }
 
     void stop() { stopReceivingNewCalls(); }
@@ -1607,7 +2412,7 @@ private:
         {
             /// Connection established and the responder has been started.
             /// So we pass this responder to a Call and make another responder for next connection.
-            auto new_call = std::make_unique<Call>(call_type, std::move(responder), owner.iserver, owner.log);
+            auto new_call = std::make_unique<Call>(call_type, std::move(responder), owner.iserver, query_info_map, exception_map, owner.log);
             auto * new_call_ptr = new_call.get();
             current_calls[new_call_ptr] = std::move(new_call);
             new_call_ptr->start([this, new_call_ptr]() { onFinishCall(new_call_ptr); });
@@ -1658,6 +2463,29 @@ private:
         }
     }
 
+    static bool shouldClean(
+        const std::shared_ptr<ExceptionWrapper> & execption_wrapper,
+        const std::chrono::time_point<std::chrono::steady_clock> & now)
+    {
+        auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(now - execption_wrapper->timestamp);
+        if (elapsed > std::chrono::seconds(10s))
+            return true;
+        return false;
+    }
+
+    void clean()
+    {
+        using namespace std::chrono_literals;
+        setThreadName("GRPCServerCleaner");
+        while (!should_stop)
+        {
+            auto const & now = std::chrono::steady_clock::now();
+            exception_map->eraseAll(shouldClean, now);
+
+            std::this_thread::sleep_for(10s);
+        }
+    }
+
     GRPCServer & owner;
     ThreadFromGlobalPool queue_thread;
     std::vector<std::unique_ptr<BaseResponder>> responders_for_new_calls;
@@ -1665,6 +2493,10 @@ private:
     std::vector<std::unique_ptr<Call>> finished_calls;
     bool should_stop = false;
     mutable std::mutex mutex;
+
+    std::shared_ptr<QueryInfoWrapperMap> query_info_map;
+    std::shared_ptr<ExceptionWrapperMap> exception_map;
+    ThreadFromGlobalPool clean_thread;
 };
 
 

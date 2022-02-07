@@ -197,6 +197,10 @@ StorageKafka::StorageKafka(
     storage_metadata.setColumns(columns_);
     setInMemoryMetadata(storage_metadata);
     auto task_count = thread_per_consumer ? num_consumers : 1;
+    /// Consuming is disabled on store workers.
+    if (getContext()->getRunningMode() == Context::RunningMode::STORE)
+        task_count = 0;
+
     for (size_t i = 0; i < task_count; ++i)
     {
         auto task = getContext()->getMessageBrokerSchedulePool().createTask(log->name(), [this, i]{ threadFunc(i); });
@@ -299,6 +303,10 @@ SinkToStoragePtr StorageKafka::write(const ASTPtr &, const StorageMetadataPtr & 
 
 void StorageKafka::startup()
 {
+    /// Consuming is disabled on store workers.
+    if (getContext()->getRunningMode() == Context::RunningMode::STORE)
+        return;
+
     for (size_t i = 0; i < num_consumers; ++i)
     {
         try

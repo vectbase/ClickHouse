@@ -411,7 +411,11 @@ void ExpressionAnalyzer::initGlobalSubqueriesAndExternalTables(bool do_global)
 {
     if (do_global)
     {
-        GlobalSubqueriesVisitor::Data subqueries_data(getContext(), subquery_depth, isRemoteStorage(),
+        /// Only for debug.
+//        WriteBufferFromOwnString wb;
+//        dumpAST(*query, wb);
+//        LOG_DEBUG(&Poco::Logger::get("initGlobalSubqueriesAndExternalTables"), "query AST:\n{}", wb.str());
+        GlobalSubqueriesVisitor::Data subqueries_data(getContext(), subquery_depth, shouldAddExternalStorage(),
                                                    external_tables, subqueries_for_sets, has_global_subqueries);
         GlobalSubqueriesVisitor(subqueries_data).visit(query);
     }

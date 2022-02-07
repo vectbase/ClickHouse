@@ -15,6 +15,7 @@
 #include <Processors/QueryPlan/LimitStep.h>
 #include <Processors/QueryPlan/OffsetStep.h>
 #include <Processors/QueryPlan/Optimizations/QueryPlanOptimizationSettings.h>
+#include <Processors/QueryPlan/DistributedPlanner.h>
 #include <Common/typeid_cast.h>
 
 #include <Interpreters/InDepthNodeVisitor.h>
@@ -34,6 +35,7 @@ InterpreterSelectWithUnionQuery::InterpreterSelectWithUnionQuery(
         const ASTPtr & query_ptr_, ContextPtr context_,
         const SelectQueryOptions & options_, const Names & required_result_column_names)
     : IInterpreterUnionOrSelectQuery(query_ptr_, context_, options_)
+    , log(&Poco::Logger::get("InterpreterSelectWithUnionQuery"))
 {
     ASTSelectWithUnionQuery * ast = query_ptr->as<ASTSelectWithUnionQuery>();
     bool require_full_header = ast->hasNonDefaultUnionMode();
@@ -165,7 +167,29 @@ InterpreterSelectWithUnionQuery::InterpreterSelectWithUnionQuery(
     }
     options.ignore_limits |= all_nested_ignore_limits;
     options.ignore_quota |= all_nested_ignore_quota;
+}
 
+void InterpreterSelectWithUnionQuery::rewriteDistributedQuery(bool is_subquery, size_t, bool need_log)
+{
+    IInterpreterUnionOrSelectQuery::rewriteDistributedQuery(is_subquery);
+
+    size_t num_plans = nested_interpreters.size();
+    distributed_query_ptr = query_ptr->clone();
+    ASTSelectWithUnionQuery * distributed_ast = distributed_query_ptr->as<ASTSelectWithUnionQuery>();
+    String rewritten_query;
+
+    for (size_t i = 0; i < num_plans; ++i)
+        distributed_ast->list_of_selects->children.at(i) = nested_interpreters[i]->getDistributedQueryPtr()->clone();
+
+    rewritten_query = queryToString(distributed_query_ptr);
+    if (need_log)
+        LOG_DEBUG(
+            log,
+            "[{}] Rewrite\n\"{}\"\n=>\n\"{}\"",
+            static_cast<void *>(context.get()),
+            context->getClientInfo().distributed_query,
+            rewritten_query);
+    context->getClientInfo().distributed_query = std::move(rewritten_query);
 }
 
 Block InterpreterSelectWithUnionQuery::getCommonHeaderForUnion(const Blocks & headers)
@@ -260,6 +284,7 @@ void InterpreterSelectWithUnionQuery::buildQueryPlan(QueryPlan & query_plan)
     if (num_plans == 1)
     {
         nested_interpreters.front()->buildQueryPlan(query_plan);
+        nested_interpreters.front()->rewriteDistributedQuery(false);
     }
     else
     {
@@ -270,6 +295,7 @@ void InterpreterSelectWithUnionQuery::buildQueryPlan(QueryPlan & query_plan)
         {
             plans[i] = std::make_unique<QueryPlan>();
             nested_interpreters[i]->buildQueryPlan(*plans[i]);
+            nested_interpreters[i]->rewriteDistributedQuery(false);
 
             if (!blocksHaveEqualStructure(plans[i]->getCurrentDataStream().header, result_header))
             {
@@ -328,8 +354,17 @@ BlockIO InterpreterSelectWithUnionQuery::execute()
     QueryPlan query_plan;
     buildQueryPlan(query_plan);
 
+    rewriteDistributedQuery(false, 0, true);
+
+    query_plan.checkInitialized();
+    query_plan.optimize(QueryPlanOptimizationSettings::fromContext(context));
+
+    DistributedPlanner planner(query_plan, context);
+    planner.buildDistributedPlan();
+
+    QueryPlanOptimizationSettings optimization_settings{.optimize_plan = false};
     auto pipeline_builder = query_plan.buildQueryPipeline(
-        QueryPlanOptimizationSettings::fromContext(context),
+        optimization_settings,
         BuildQueryPipelineSettings::fromContext(context));
 
     pipeline_builder->addInterpreterContext(context);

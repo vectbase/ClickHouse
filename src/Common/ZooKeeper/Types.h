@@ -33,5 +33,7 @@ Coordination::RequestPtr makeCreateRequest(const std::string & path, const std::
 Coordination::RequestPtr makeRemoveRequest(const std::string & path, int version);
 Coordination::RequestPtr makeSetRequest(const std::string & path, const std::string & data, int version);
 Coordination::RequestPtr makeCheckRequest(const std::string & path, int version);
+Coordination::RequestPtr makeAddWatchRequest(const std::string & path, int mode);
+Coordination::RequestPtr makeRemoveWatchesRequest(const std::string & path, int type);
 
 }

@@ -115,12 +115,14 @@ void IStorage::read(
     {
         auto header = (query_info.projection ? query_info.projection->desc->metadata : metadata_snapshot)
                           ->getSampleBlockForColumns(column_names, getVirtuals(), getStorageID());
-        InterpreterSelectQuery::addEmptySourceToQueryPlan(query_plan, header, query_info, context);
+        InterpreterSelectQuery::addEmptySourceToQueryPlan(query_plan, header, query_info, context, getName());
     }
     else
     {
         auto read_step = std::make_unique<ReadFromStorageStep>(std::move(pipe), getName());
-        query_plan.addStep(std::move(read_step));
+        const auto & ast = query_info.query->as<ASTSelectQuery &>();
+        InterpreterParamsPtr interpreter_params = std::make_shared<InterpreterParams>(context, ast);
+        query_plan.addStep(std::move(read_step), std::move(interpreter_params));
     }
 }
 

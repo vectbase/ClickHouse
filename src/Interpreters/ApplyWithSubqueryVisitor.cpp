@@ -105,4 +105,23 @@ void ApplyWithSubqueryVisitor::visit(ASTFunction & func, const Data & data)
     }
 }
 
+bool ReplaceSubqueryMatcher::needChildVisit(ASTPtr &, const ASTPtr &, Data &)
+{
+    return true;
+}
+
+void ReplaceSubqueryMatcher::visit(ASTPtr & ast, Data & data)
+{
+    if (data.done)
+        return;
+
+    if (auto * t = ast->as<ASTSubquery>())
+    {
+        assert(data.query);
+        t->children.clear();
+        t->children.push_back(data.query->clone());
+        data.done = true;
+    }
+}
+
 }

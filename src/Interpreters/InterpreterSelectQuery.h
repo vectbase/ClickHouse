@@ -76,6 +76,8 @@ public:
 
     ~InterpreterSelectQuery() override;
 
+    virtual void rewriteDistributedQuery(bool is_subquery, size_t tables_count, bool need_log = false) override;
+
     /// Execute a query. Get the stream of blocks to read.
     BlockIO execute() override;
 
@@ -100,7 +102,11 @@ public:
     bool hasAggregation() const { return query_analyzer->hasAggregation(); }
 
     static void addEmptySourceToQueryPlan(
-        QueryPlan & query_plan, const Block & source_header, const SelectQueryInfo & query_info, ContextPtr context_);
+        QueryPlan & query_plan,
+        const Block & source_header,
+        const SelectQueryInfo & query_info,
+        ContextPtr context_,
+        const String & storage_name = "");
 
     Names getRequiredColumns() { return required_columns; }
 

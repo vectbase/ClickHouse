@@ -349,6 +349,8 @@ void DatabaseReplicated::checkQueryValid(const ASTPtr & query, ContextPtr query_
     /// Replicas will set correct name of current database in query context (database name can be different on replicas)
     if (auto * ddl_query = dynamic_cast<ASTQueryWithTableAndOutput *>(query.get()))
     {
+        if (ddl_query->table.empty())
+            return;
         if (ddl_query->database != getDatabaseName())
             throw Exception(ErrorCodes::UNKNOWN_DATABASE, "Database was renamed");
         ddl_query->database.clear();
@@ -456,6 +458,7 @@ BlockIO DatabaseReplicated::tryEnqueueReplicatedDDL(const ASTPtr & query, Contex
     entry.query = queryToString(query);
     entry.initiator = ddl_worker->getCommonHostID();
     entry.setSettingsIfRequired(query_context);
+    entry.query_ptr = query->clone();
     String node_path = ddl_worker->tryEnqueueAndExecuteEntry(entry, query_context);
 
     Strings hosts_to_wait = getZooKeeper()->getChildren(zookeeper_path + "/replicas");
@@ -817,6 +820,17 @@ void DatabaseReplicated::commitCreateTable(const ASTCreateQuery & query, const S
         txn->addOp(zkutil::makeCreateRequest(metadata_zk_path, statement, zkutil::CreateMode::Persistent));
     }
     DatabaseAtomic::commitCreateTable(query, table, table_metadata_tmp_path, table_metadata_path, query_context);
+}
+
+void DatabaseReplicated::commitDatabase(ContextPtr query_context, const std::function<void(ZooKeeperMetadataTransactionPtr)> & add_ops)
+{
+    auto txn = query_context->getZooKeeperMetadataTransaction();
+    if (txn && txn->isInitialQuery())
+    {
+        if (add_ops)
+            add_ops(txn);
+        txn->commit();
+    }
 }
 
 void DatabaseReplicated::commitAlterTable(const StorageID & table_id,

@@ -42,6 +42,9 @@ MergingAggregatedStep::MergingAggregatedStep(
 
 void MergingAggregatedStep::transformPipeline(QueryPipelineBuilder & pipeline, const BuildQueryPipelineSettings &)
 {
+    /// Forget about current totals and extremes. They will be calculated again after aggregation if needed.
+    pipeline.dropTotalsAndExtremes();
+
     if (!memory_efficient_aggregation)
     {
         /// We union several sources into one, paralleling the work.

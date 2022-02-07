@@ -18,6 +18,8 @@ public:
 
 private:
     ASTPtr query_ptr;
+
+    void uploadCurrentDatabase(const String & new_database);
 };
 
 }

@@ -32,6 +32,7 @@
 #include <Storages/MergeTree/MutateFromLogEntryTask.h>
 #include <Storages/VirtualColumnUtils.h>
 #include <Storages/MergeTree/MergeTreeReaderCompact.h>
+#include <Storages/StorageDistributed.h>
 
 
 #include <Databases/IDatabase.h>
@@ -274,7 +275,8 @@ StorageReplicatedMergeTree::StorageReplicatedMergeTree(
     const MergingParams & merging_params_,
     std::unique_ptr<MergeTreeSettings> settings_,
     bool has_force_restore_data_flag,
-    bool allow_renaming_)
+    bool allow_renaming_,
+    StoragePtr embedded_distributed_)
     : MergeTreeData(table_id_,
                     relative_data_path_,
                     metadata_,
@@ -305,6 +307,7 @@ StorageReplicatedMergeTree::StorageReplicatedMergeTree(
     , replicated_fetches_pool_size(getContext()->getSettingsRef().background_fetches_pool_size)
     , replicated_fetches_throttler(std::make_shared<Throttler>(getSettings()->max_replicated_fetches_network_bandwidth, getContext()->getReplicatedFetchesThrottler()))
     , replicated_sends_throttler(std::make_shared<Throttler>(getSettings()->max_replicated_sends_network_bandwidth, getContext()->getReplicatedSendsThrottler()))
+    , embedded_distributed(embedded_distributed_)
 {
     queue_updating_task = getContext()->getSchedulePool().createTask(
         getStorageID().getFullTableName() + " (StorageReplicatedMergeTree::queueUpdatingTask)", [this]{ queueUpdatingTask(); });
@@ -4315,6 +4318,11 @@ void StorageReplicatedMergeTree::assertNotReadonly() const
 
 SinkToStoragePtr StorageReplicatedMergeTree::write(const ASTPtr & /*query*/, const StorageMetadataPtr & metadata_snapshot, ContextPtr local_context)
 {
+    if (getContext()->getRunningMode() == Context::RunningMode::COMPUTE && getStorageID().getDatabaseName() != DatabaseCatalog::SYSTEM_DATABASE)
+    {
+        return embedded_distributed->write(nullptr, metadata_snapshot, local_context);
+    }
+
     const auto storage_settings_ptr = getSettings();
     assertNotReadonly();
 
@@ -4323,7 +4331,9 @@ SinkToStoragePtr StorageReplicatedMergeTree::write(const ASTPtr & /*query*/, con
 
     // TODO: should we also somehow pass list of columns to deduplicate on to the ReplicatedMergeTreeBlockOutputStream ?
     return std::make_shared<ReplicatedMergeTreeSink>(
-        *this, metadata_snapshot, query_settings.insert_quorum,
+        *this,
+        metadata_snapshot,
+        query_settings.insert_quorum,
         query_settings.insert_quorum_timeout.totalMilliseconds(),
         query_settings.max_partitions_per_insert_block,
         query_settings.insert_quorum_parallel,
@@ -5032,6 +5042,7 @@ void StorageReplicatedMergeTree::checkTableCanBeRenamed() const
 void StorageReplicatedMergeTree::rename(const String & new_path_to_table_data, const StorageID & new_table_id)
 {
     checkTableCanBeRenamed();
+    renameInMemory(new_table_id);
     MergeTreeData::rename(new_path_to_table_data, new_table_id);
 
     /// Update table name in zookeeper
@@ -5051,6 +5062,22 @@ void StorageReplicatedMergeTree::rename(const String & new_path_to_table_data, c
     }
 
     /// TODO: You can update names of loggers.
+}
+
+void StorageReplicatedMergeTree::renameInMemory(const StorageID & new_table_id)
+{
+    if (embedded_distributed)
+    {
+        auto embedded_distributed_table = std::dynamic_pointer_cast<StorageDistributed>(embedded_distributed);
+        if (!embedded_distributed_table)
+            throw Exception(
+                "Table " + getStorageID().getNameForLogs() + " embedded_distributed only for StorageDistributed table engine.",
+                ErrorCodes::NOT_IMPLEMENTED);
+        embedded_distributed_table->setRemoteDatabaseName(new_table_id.database_name);
+        embedded_distributed_table->setRemoteTableName(new_table_id.table_name);
+        embedded_distributed->renameInMemory(new_table_id);
+    }
+    IStorage::renameInMemory(new_table_id);
 }
 
 

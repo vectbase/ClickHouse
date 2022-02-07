@@ -64,8 +64,14 @@ Pipe StorageInput::read(
     /// It is TCP request if we have callbacks for input().
     if (query_context->getInputBlocksReaderCallback())
     {
-        /// Send structure to the client.
-        query_context->initializeInput(shared_from_this());
+        /// There are two cases to initialize input.
+        /// 1. In standalone mode.
+        /// 2. In distributed mode and current query is not initial query.
+        if (context->isStandaloneMode() || !context->isInitialQuery())
+        {
+            /// Send structure to the client.
+            query_context->initializeInput(shared_from_this());
+        }
         return Pipe(std::make_shared<StorageInputSource>(query_context, metadata_snapshot->getSampleBlock()));
     }
 

@@ -72,6 +72,8 @@ struct DDLLogEntry
     String initiator; // optional
     std::optional<SettingsChanges> settings;
 
+    ASTPtr query_ptr;
+
     void setSettingsIfRequired(ContextPtr context);
     String toString() const;
     void parse(const String & data);
@@ -196,6 +198,12 @@ public:
         if (isExecuted())
             throw Exception(ErrorCodes::LOGICAL_ERROR, "Cannot add ZooKeeper operation because query is executed. It's a bug.");
         ops.emplace_back(op);
+    }
+
+    void removeLastOp()
+    {
+        if (ops.size() > 0)
+            ops.resize(ops.size()-1);
     }
 
     void moveOpsTo(Coordination::Requests & other_ops)

@@ -175,6 +175,20 @@ public:
         const Requests & requests,
         MultiCallback callback) override;
 
+    /// Add a watch to the given znode using the given mode. Note: not all watch types can be set with this method.
+    /// Only the modes available in WatchMode can be set with this method.
+    void addWatch(
+        const String &path,
+        WatchMode mode,
+        AddWatchCallback callback,
+        WatchCallback watch) override;
+
+    /// For the given znode path, removes the specified watcher of given watchType.
+    void removeWatches(
+        const String &path,
+        WatchType type,
+        RemoveWatchesCallback callback) override;
+
     /// Without forcefully invalidating (finalizing) ZooKeeper session before
     /// establishing a new one, there was a possibility that server is using
     /// two ZooKeeper sessions simultaneously in different parts of code.
@@ -236,6 +250,12 @@ private:
 
     Watches watches;
     std::mutex watches_mutex;
+
+    Watches persistent_watches;
+    std::mutex persistent_watches_mutex;
+
+    Watches persistent_recursive_watches;
+    std::mutex persistent_recursive_watches_mutex;
 
     ThreadFromGlobalPool send_thread;
     ThreadFromGlobalPool receive_thread;

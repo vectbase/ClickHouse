@@ -9,6 +9,7 @@
 #include <Parsers/ASTTablesInSelectQuery.h>
 #include <Parsers/ExpressionListParsers.h>
 #include <Parsers/parseQuery.h>
+#include <Parsers/queryToString.h>
 
 #include <Access/AccessFlags.h>
 #include <Access/ContextAccess.h>
@@ -62,6 +63,7 @@
 #include <Processors/Transforms/AggregatingTransform.h>
 #include <Processors/Transforms/ExpressionTransform.h>
 #include <Processors/Transforms/FilterTransform.h>
+#include <Processors/QueryPlan/DistributedPlanner.h>
 
 #include <Storages/MergeTree/MergeTreeWhereOptimizer.h>
 #include <Storages/IStorage.h>
@@ -347,7 +349,10 @@ InterpreterSelectQuery::InterpreterSelectQuery(
     {
         interpreter_subquery = joined_tables.makeLeftTableSubquery(options.subquery());
         if (interpreter_subquery)
+        {
             source_header = interpreter_subquery->getSampleBlock();
+            interpreter_subquery->rewriteDistributedQuery(true);
+        }
     }
 
     joined_tables.rewriteDistributedInAndJoins(query_ptr);
@@ -399,7 +404,8 @@ InterpreterSelectQuery::InterpreterSelectQuery(
         if (try_move_to_prewhere && storage && storage->supportsPrewhere() && query.where() && !query.prewhere())
         {
             /// PREWHERE optimization: transfer some condition from WHERE to PREWHERE if enabled and viable
-            if (const auto & column_sizes = storage->getColumnSizes(); !column_sizes.empty())
+            if (const auto & column_sizes = storage->getColumnSizes();
+                !column_sizes.empty() || context->getRunningMode() == Context::RunningMode::COMPUTE)
             {
                 /// Extract column compressed sizes.
                 std::unordered_map<std::string, UInt64> column_compressed_sizes;
@@ -438,6 +444,10 @@ InterpreterSelectQuery::InterpreterSelectQuery(
             std::move(subquery_for_sets),
             std::move(prepared_sets));
 
+        /// For SQL just like "SELECT ... FROM _temporary_and_external_tables.`_tmp_fbe82e3a-1815-4563-bbe8-2e3a1815e563`"
+        if (!query_analyzer->getExternalTables().empty())
+            context->setSkipDistributedPlan(true);
+
         if (!options.only_analyze)
         {
             if (query.sampleSize() && (input_pipe || !storage || !storage->supportsSampling()))
@@ -456,7 +466,10 @@ InterpreterSelectQuery::InterpreterSelectQuery(
             /// Save the new temporary tables in the query context
             for (const auto & it : query_analyzer->getExternalTables())
                 if (!context->tryResolveStorageID({"", it.first}, Context::ResolveExternal))
+                {
                     context->addExternalTable(it.first, std::move(*it.second));
+                    LOG_DEBUG(log, "Add external table {} to context {}", it.first, static_cast<void*>(context.get()));
+                }
         }
 
         if (!options.only_analyze || options.modify_inplace)
@@ -499,6 +512,9 @@ InterpreterSelectQuery::InterpreterSelectQuery(
 
         /// Calculate structure of the result.
         result_header = getSampleBlockImpl();
+
+        distributed_query_ptr = query_ptr->clone();
+        rewriteDistributedQuery(false, joined_tables.tablesCount());
     };
 
     analyze(shouldMoveToPrewhere());
@@ -566,6 +582,27 @@ InterpreterSelectQuery::InterpreterSelectQuery(
     sanitizeBlock(result_header, true);
 }
 
+void InterpreterSelectQuery::rewriteDistributedQuery(bool is_subquery, size_t tables_count, bool need_log)
+{
+    IInterpreterUnionOrSelectQuery::rewriteDistributedQuery(is_subquery);
+
+    if (interpreter_subquery && tables_count == 1)
+    {
+        ReplaceSubqueryVisitor::Data data{.query = interpreter_subquery->getDistributedQueryPtr()};
+        ReplaceSubqueryVisitor(data).visit(distributed_query_ptr);
+    }
+
+    String maybe_rewritten_query = queryToString(distributed_query_ptr);
+    if (need_log)
+        LOG_DEBUG(
+            log,
+            "[{}] Rewrite\n\"{}\"\n=>\n\"{}\"",
+            static_cast<void *>(context.get()),
+            context->getClientInfo().distributed_query,
+            maybe_rewritten_query);
+    context->getClientInfo().distributed_query = std::move(maybe_rewritten_query);
+}
+
 void InterpreterSelectQuery::buildQueryPlan(QueryPlan & query_plan)
 {
     executeImpl(query_plan, std::move(input_pipe));
@@ -594,8 +631,15 @@ BlockIO InterpreterSelectQuery::execute()
 
     buildQueryPlan(query_plan);
 
+    query_plan.checkInitialized();
+    query_plan.optimize(QueryPlanOptimizationSettings::fromContext(context));
+
+    DistributedPlanner planner(query_plan, context);
+    planner.buildDistributedPlan();
+
+    QueryPlanOptimizationSettings optimization_settings{.optimize_plan = false};
     res.pipeline = QueryPipelineBuilder::getPipeline(std::move(*query_plan.buildQueryPipeline(
-        QueryPlanOptimizationSettings::fromContext(context), BuildQueryPipelineSettings::fromContext(context))));
+        optimization_settings, BuildQueryPipelineSettings::fromContext(context))));
     return res;
 }
 
@@ -1161,7 +1205,7 @@ void InterpreterSelectQuery::executeImpl(QueryPlan & query_plan, std::optional<P
                 }
             }
 
-            if (!query_info.projection && expressions.hasWhere())
+            if (!query_info.projection && expressions.hasWhere() && !expressions.optimize_trivial_count)
                 executeWhere(query_plan, expressions.before_where, expressions.remove_where_filter);
 
             if (expressions.need_aggregate)
@@ -1212,7 +1256,9 @@ void InterpreterSelectQuery::executeImpl(QueryPlan & query_plan, std::optional<P
 
             // If there is no global subqueries, we can run subqueries only when receive them on server.
             if (!query_analyzer->hasGlobalSubqueries() && !subqueries_for_sets.empty())
+            {
                 executeSubqueriesInSetsAndJoins(query_plan, subqueries_for_sets);
+            }
         }
 
         if (expressions.second_stage || from_aggregation_stage)
@@ -1474,7 +1520,11 @@ static void executeMergeAggregatedImpl(
 }
 
 void InterpreterSelectQuery::addEmptySourceToQueryPlan(
-    QueryPlan & query_plan, const Block & source_header, const SelectQueryInfo & query_info, ContextPtr context_)
+    QueryPlan & query_plan,
+    const Block & source_header,
+    const SelectQueryInfo & query_info,
+    ContextPtr context_,
+    const String & storage_name)
 {
     Pipe pipe(std::make_shared<NullSource>(source_header));
 
@@ -1511,8 +1561,9 @@ void InterpreterSelectQuery::addEmptySourceToQueryPlan(
     }
 
     auto read_from_pipe = std::make_unique<ReadFromPreparedSource>(std::move(pipe));
-    read_from_pipe->setStepDescription("Read from NullSource");
-    query_plan.addStep(std::move(read_from_pipe));
+    read_from_pipe->setStepDescription(storage_name.empty() ? "Read from NullSource" : storage_name);
+    InterpreterParamsPtr interpreter_params = std::make_shared<InterpreterParams>(context_, query_info.query->as<ASTSelectQuery &>());
+    query_plan.addStep(std::move(read_from_pipe), std::move(interpreter_params));
 
     if (query_info.projection)
     {
@@ -1803,9 +1854,21 @@ void InterpreterSelectQuery::executeFetchColumns(QueryProcessingStage::Enum proc
             auto source = std::make_shared<SourceFromSingleChunk>(block_with_count);
             auto prepared_count = std::make_unique<ReadFromPreparedSource>(Pipe(std::move(source)), context);
             prepared_count->setStepDescription("Optimized trivial count");
-            query_plan.addStep(std::move(prepared_count));
-            from_stage = QueryProcessingStage::WithMergeableState;
-            analysis_result.first_stage = false;
+            const auto & ast = query_info.query->as<ASTSelectQuery &>();
+            InterpreterParamsPtr interpreter_params = std::make_shared<InterpreterParams>(context, ast);
+            query_plan.addStep(std::move(prepared_count), std::move(interpreter_params));
+            if (context->isInitialQuery() && context->getRunningMode() == Context::RunningMode::STORE)
+            {
+                /// If initial query is running on store worker, skip first stage.
+                from_stage = QueryProcessingStage::WithMergeableState;
+                analysis_result.first_stage = false;
+            }
+            else
+            {
+                /// Build query plan for the first stage both on compute and store nodes, therefore we can get the same original query plan.
+                /// If trivial count is optimized, skip executeWhere.
+            }
+            analysis_result.optimize_trivial_count = true;
             return;
         }
     }
@@ -1886,6 +1949,8 @@ void InterpreterSelectQuery::executeFetchColumns(QueryProcessingStage::Enum proc
 
             if (query_analyzer->hasAggregation())
                 interpreter_subquery->ignoreWithTotals();
+
+            interpreter_subquery->rewriteDistributedQuery(true);
         }
 
         interpreter_subquery->buildQueryPlan(query_plan);
@@ -2068,7 +2133,9 @@ void InterpreterSelectQuery::executeAggregation(QueryPlan & query_plan, const Ac
         settings.max_threads,
         settings.min_free_disk_space_for_temporary_data,
         settings.compile_aggregate_expressions,
-        settings.min_count_to_compile_aggregate_expression);
+        settings.min_count_to_compile_aggregate_expression,
+        {},
+        analysis_result.optimize_trivial_count);
 
     SortDescription group_by_sort_description;
 

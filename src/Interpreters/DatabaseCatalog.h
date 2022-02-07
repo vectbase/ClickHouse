@@ -1,6 +1,7 @@
 #pragma once
 
 #include <Core/UUID.h>
+#include <Common/ZooKeeper/ZooKeeper.h>
 #include <Interpreters/Context_fwd.h>
 #include <Interpreters/StorageID.h>
 #include <Parsers/IAST_fwd.h>
@@ -76,7 +77,20 @@ private:
     bool is_database_guard = false;
 };
 
+class DistributedDDLGuard
+{
+public:
+    DistributedDDLGuard(zkutil::ZooKeeperPtr zookeeper_, const String & database_name_, const String & table_name_ = "");
+    bool isCreated() {return created;}
+    ~DistributedDDLGuard();
+private:
+    bool created = false;
+    String hold_path;
+    zkutil::ZooKeeperPtr zookeeper = nullptr;
+};
+
 using DDLGuardPtr = std::unique_ptr<DDLGuard>;
+using DistributedDDLGuardPtr = std::shared_ptr<DistributedDDLGuard>;
 
 
 /// Creates temporary table in `_temporary_and_external_tables` with randomly generated unique StorageID.
@@ -139,6 +153,7 @@ public:
     /// Get an object that protects the database from concurrent DDL queries all tables in the database
     std::unique_lock<std::shared_mutex> getExclusiveDDLGuardForDatabase(const String & database);
 
+    DistributedDDLGuardPtr getDistributedDDLGuard(const String & database, const String & table = "");
 
     void assertDatabaseExists(const String & database_name) const;
     void assertDatabaseDoesntExist(const String & database_name) const;

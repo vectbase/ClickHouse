@@ -31,7 +31,9 @@ enum class OpNum : int32_t
     List = 12,
     Check = 13,
     Multi = 14,
+    RemoveWatches = 18,
     Auth = 100,
+    AddWatch = 106,
     SessionID = 997, /// Special internal request
 };
 

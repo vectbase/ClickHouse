@@ -1,0 +1,78 @@
+#pragma once
+//#if USE_GRPC
+#include <map>
+#include <memory>
+#include <shared_mutex>
+
+#include <grpcpp/grpcpp.h>
+#include <grpcpp/impl/codegen/proto_utils.h>
+#include <grpcpp/impl/codegen/sync_stream.h>
+
+#include <Core/Block.h>
+#include <base/types.h>
+#include <Poco/Net/SocketAddress.h>
+#include "clickhouse_grpc.grpc.pb.h"
+#include "clickhouse_grpc.pb.h"
+
+using GRPCQueryInfo = clickhouse::grpc::QueryInfo;
+using GRPCResult = clickhouse::grpc::Result;
+using GRPCTicket = clickhouse::grpc::Ticket;
+using GRPCStub = clickhouse::grpc::ClickHouse::Stub;
+
+namespace DB
+{
+using ReadDataCallback = std::function<void(const Block & block)>;
+
+class GRPCClient
+{
+public:
+    enum MessageType
+    {
+        Data = 1,
+        Totals = 2,
+        Extremes = 3,
+        MAX = Extremes,
+    };
+public:
+    GRPCClient(const String & addr_, const String & description_);
+    ~GRPCClient() = default;
+
+    /// Send params of plan fragment to remote, and execute it.
+    GRPCResult executePlanFragment(const GRPCQueryInfo & query_info);
+
+    /// Initialize reader and inner context.
+    void prepareRead(const GRPCTicket & ticket_);
+
+    /// Try to read a block from remote.
+    /// If got EOF, an empty block will be returned, you can use if (!block) to check it.
+    MessageType read(Block & bock);
+
+    /// Cancel plan fragment (ticket associated with the prepareRead)
+    void cancel();
+
+private:
+    struct InnerContext
+    {
+        InnerContext(
+            std::shared_ptr<grpc::Channel> & ch_,
+            std::shared_ptr<grpc::ClientContext> & ctx_,
+            std::unique_ptr<GRPCStub> & stub_,
+            std::unique_ptr<grpc::ClientReader<GRPCResult>> & reader_)
+            : ch(ch_), ctx(ctx_), stub(std::move(stub_)), reader(std::move(reader_))
+        {
+        }
+        ~InnerContext() { }
+
+        std::shared_ptr<grpc::Channel> ch;
+        std::shared_ptr<grpc::ClientContext> ctx;
+        std::unique_ptr<GRPCStub> stub;
+        std::unique_ptr<grpc::ClientReader<GRPCResult>> reader;
+    };
+
+    Poco::Logger * log;
+    String addr;
+    std::unique_ptr<InnerContext> inner_context;
+    GRPCTicket ticket;
+};
+}
+//#endif

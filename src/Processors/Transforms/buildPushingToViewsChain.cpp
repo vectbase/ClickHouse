@@ -163,7 +163,9 @@ Chain buildPushingToViewsChain(
         disable_deduplication_for_children = !no_destination && storage->supportsDeduplication();
 
     auto table_id = storage->getStorageID();
-    Dependencies dependencies = DatabaseCatalog::instance().getDependencies(table_id);
+    Dependencies dependencies;
+    if (context->getRunningMode() == Context::RunningMode::COMPUTE)
+        dependencies = DatabaseCatalog::instance().getDependencies(table_id);
 
     /// We need special context for materialized views insertions
     ContextMutablePtr select_context;
@@ -375,6 +377,9 @@ static void process(Block & block, ViewRuntimeData & view, const ViewsData & vie
         block,
         views_data.source_storage->getVirtuals()));
 
+    /// Set current query id and initial query id.
+    local_context->getClientInfo().setInitialQuery();
+    local_context->setCurrentQueryId("");
     /// We need keep InterpreterSelectQuery, until the processing will be finished, since:
     ///
     /// - We copy Context inside InterpreterSelectQuery to support

@@ -60,6 +60,18 @@ message Compression {
    CompressionLevel level = 2;
 }
 
+message Ticket
+{
+   // same as QueryInfo.query_id
+   string initial_query_id = 1;
+   int32 stage_id = 2;
+   string node_id = 3;
+}
+
+message MapEntry {
+   repeated string sources = 1;
+}
+
 // Information about a query which a client sends to a ClickHouse server.
 // The first QueryInfo can set any of the following fields. Extra QueryInfos only add extra data.
 // In extra QueryInfos only `input_data`, `external_tables`, `next_query_info` and `cancel` fields can be set.
@@ -101,6 +113,19 @@ message QueryInfo {
    /// Controls how a ClickHouse server will compress query execution results before sending back to the client.
    /// If not set the compression settings from the configuration file will be used.
    Compression result_compression = 17;
+
+   uint32 query_kind = 18;
+   /// Below are used in distributed plan execution.
+   string initial_query_id = 19;
+   int32 stage_id = 20;
+   string node_id = 21;
+   /// The mapping of parent stage id to sources.
+   map<int32, MapEntry> parent_sources = 22;
+   /// Format is "replica_name:grpc_port"
+   repeated string sinks = 24;
+   bool has_view_source = 25;
+   bool has_input_function = 26;
+   bool empty_result_for_aggregation_by_empty_set = 27;
 }
 
 enum LogsLevel {
@@ -171,4 +196,8 @@ service ClickHouse {
    rpc ExecuteQueryWithStreamInput(stream QueryInfo) returns (Result) {}
    rpc ExecuteQueryWithStreamOutput(QueryInfo) returns (stream Result) {}
    rpc ExecuteQueryWithStreamIO(stream QueryInfo) returns (stream Result) {}
+
+   rpc ExecutePlanFragment(QueryInfo) returns (Result) {}
+   rpc FetchPlanFragmentResult(Ticket) returns (stream Result) {}
+   rpc CancelPlanFragment(Ticket) returns (Result) {}
 }

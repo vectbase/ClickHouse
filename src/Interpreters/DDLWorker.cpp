@@ -514,9 +514,9 @@ bool DDLWorker::tryExecuteQuery(const String & query, DDLTaskBase & task, const 
     WriteBufferFromString ostr(dummy_string);
     std::optional<CurrentThread::QueryScope> query_scope;
 
+    auto query_context = task.makeQueryContext(context, zookeeper);
     try
     {
-        auto query_context = task.makeQueryContext(context, zookeeper);
         if (!task.is_initial_query)
             query_scope.emplace(query_context);
         executeQuery(istr, ostr, !task.is_initial_query, query_context, {});
@@ -536,6 +536,18 @@ bool DDLWorker::tryExecuteQuery(const String & query, DDLTaskBase & task, const 
 
         task.execution_status = ExecutionStatus::fromCurrentException();
         tryLogCurrentException(log, "Query " + query + " wasn't finished successfully");
+
+        /// Write fail status back to zookeeper immediately
+        if (auto txn = query_context->getZooKeeperMetadataTransaction())
+        {
+            if (!txn->isExecuted())
+            {
+                /// Remove the last zookeeper operation which is success status and write fail status back to zookeeper
+                txn->removeLastOp();
+                txn->addOp(zkutil::makeCreateRequest(task.getFinishedNodePath(), ExecutionStatus(task.execution_status).serializeText(), zkutil::CreateMode::Persistent));
+                txn->commit();
+            }
+        }
 
         /// We use return value of tryExecuteQuery(...) in tryExecuteQueryOnLeaderReplica(...) to determine
         /// if replica has stopped being leader and we should retry query.

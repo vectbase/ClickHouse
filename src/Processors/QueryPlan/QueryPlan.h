@@ -3,6 +3,7 @@
 #include <Core/Names.h>
 #include <Interpreters/Context_fwd.h>
 #include <Columns/IColumn.h>
+#include <Parsers/ASTSelectQuery.h>
 
 #include <list>
 #include <memory>
@@ -36,6 +37,31 @@ namespace JSONBuilder
     using ItemPtr = std::unique_ptr<IItem>;
 }
 
+/// TODO: Fields of InterpreterContext will be used to create logical operator in buildQueryPlan().
+struct InterpreterParams
+{
+    InterpreterParams(const ContextPtr & context_, const ASTSelectQuery & query_ast_) : context(context_)
+    {
+        group_by_with_totals = query_ast_.group_by_with_totals;
+        group_by_with_rollup = query_ast_.group_by_with_rollup;
+        group_by_with_cube = query_ast_.group_by_with_cube;
+    }
+
+    InterpreterParams(const InterpreterParams & interpreter_params)
+        : context(interpreter_params.context)
+        , group_by_with_totals(interpreter_params.group_by_with_totals)
+        , group_by_with_rollup(interpreter_params.group_by_with_rollup)
+        , group_by_with_cube(interpreter_params.group_by_with_cube)
+    {
+    }
+
+    ContextPtr context;
+    bool group_by_with_totals;
+    bool group_by_with_rollup;
+    bool group_by_with_cube;
+};
+using InterpreterParamsPtr = std::shared_ptr<InterpreterParams>;
+
 /// A tree of query steps.
 /// The goal of QueryPlan is to build QueryPipeline.
 /// QueryPlan let delay pipeline creation which is helpful for pipeline-level optimizations.
@@ -47,14 +73,20 @@ public:
     QueryPlan(QueryPlan &&);
     QueryPlan & operator=(QueryPlan &&);
 
-    void unitePlans(QueryPlanStepPtr step, std::vector<QueryPlanPtr> plans);
-    void addStep(QueryPlanStepPtr step);
+    void unitePlans(QueryPlanStepPtr step, std::vector<QueryPlanPtr> plans, InterpreterParamsPtr interpreter_params = {});
+    void addStep(QueryPlanStepPtr step, InterpreterParamsPtr interpreter_params = {});
 
     bool isInitialized() const { return root != nullptr; } /// Tree is not empty
     bool isCompleted() const; /// Tree is not empty and root hasOutputStream()
     const DataStream & getCurrentDataStream() const; /// Checks that (isInitialized() && !isCompleted())
 
+    void checkInitialized() const;
+    void checkNotCompleted() const;
     void optimize(const QueryPlanOptimizationSettings & optimization_settings);
+
+    void reset();
+
+    void collectCreatingSetPlan(std::vector<std::unique_ptr<QueryPlan>> & creating_set_plans);
 
     QueryPipelineBuilderPtr buildQueryPipeline(
         const QueryPlanOptimizationSettings & optimization_settings,
@@ -100,20 +132,25 @@ public:
     {
         QueryPlanStepPtr step;
         std::vector<Node *> children = {};
+        Node * parent = nullptr;
+        size_t num_parent_stages = 0; /// Number of parent stages whose child is the stage current node belongs to.
+        size_t num_leaf_nodes_in_stage = 0; /// Number of leaf nodes(including current node and its descendant nodes) in the same stage.
+        InterpreterParamsPtr interpreter_params;
     };
 
     using Nodes = std::list<Node>;
 
 private:
+    friend class DistributedPlanner;
+
     Nodes nodes;
     Node * root = nullptr;
-
-    void checkInitialized() const;
-    void checkNotCompleted() const;
 
     /// Those fields are passed to QueryPipeline.
     size_t max_threads = 0;
     std::vector<ContextPtr> interpreter_context;
+
+    Poco::Logger * log;
 };
 
 std::string debugExplainStep(const IQueryPlanStep & step);

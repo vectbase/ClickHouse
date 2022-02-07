@@ -642,6 +642,11 @@ std::unique_lock<std::shared_mutex> DatabaseCatalog::getExclusiveDDLGuardForData
     return std::unique_lock{db_guard.second};
 }
 
+DistributedDDLGuardPtr DatabaseCatalog::getDistributedDDLGuard(const String & database, const String & table)
+{
+    return std::make_shared<DistributedDDLGuard>(getContext()->getZooKeeper(), database, table);
+}
+
 bool DatabaseCatalog::isDictionaryExist(const StorageID & table_id) const
 {
     auto storage = tryGetTable(table_id, getContext());
@@ -978,6 +983,30 @@ DDLGuard::~DDLGuard()
     if (!is_database_guard)
         db_mutex.unlock_shared();
     releaseTableLock();
+}
+
+DistributedDDLGuard::DistributedDDLGuard(zkutil::ZooKeeperPtr zookeeper_, const String & database_name_, const String & table_name_): zookeeper(zookeeper_)
+{
+    try
+    {
+        auto path = fs::path(DEFAULT_ZOOKEEPER_METADATA_PATH);
+        if (table_name_.empty())
+            path = path / (database_name_ + DATABASE_LOCK_SUFFIX);
+        else
+            path = path / database_name_ / "metadata" / (table_name_ + "_lock");
+        hold_path = zookeeper->create(path, "", zkutil::CreateMode::Ephemeral);
+        created = true;
+    }
+    catch (...)
+    {
+
+    }
+}
+
+DistributedDDLGuard::~DistributedDDLGuard()
+{
+    if (created)
+        zookeeper->tryRemove(hold_path);
 }
 
 }

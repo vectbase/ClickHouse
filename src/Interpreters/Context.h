@@ -8,6 +8,7 @@
 #include <Interpreters/ClientInfo.h>
 #include <Interpreters/Context_fwd.h>
 #include <Interpreters/DatabaseCatalog.h>
+#include <Interpreters/Cluster.h>
 #include <Parsers/IAST_fwd.h>
 #include <Storages/IStorage_fwd.h>
 #include <Common/MultiVersion.h>
@@ -15,6 +16,7 @@
 #include <Common/RemoteHostFilter.h>
 #include <Common/isLocalAddress.h>
 #include <base/types.h>
+#include <Common/ZooKeeper/DistributedRWLock.h>
 
 #include "config_core.h"
 
@@ -54,6 +56,7 @@ class BackgroundSchedulePool;
 class MergeList;
 class ReplicatedFetchList;
 class Cluster;
+class ClustersWatcher;
 class Compiler;
 class MarkCache;
 class MMappedFileCache;
@@ -147,6 +150,8 @@ using InputBlocksReader = std::function<Block(ContextPtr)>;
 /// Used in distributed task processing
 using ReadTaskCallback = std::function<String()>;
 
+using ExternalTableHolders = std::unordered_map<String, std::shared_ptr<TemporaryTableHolder>>;
+
 /// An empty interface for an arbitrary object that may be attached by a shared pointer
 /// to query context, when using ClickHouse as a library.
 struct IHostContext
@@ -198,6 +203,7 @@ private:
     std::shared_ptr<const EnabledRowPolicies> initial_row_policy;
     String current_database;
     Settings settings;  /// Setting for query execution.
+    String session_id;
 
     using ProgressCallback = std::function<void(const Progress & progress)>;
     ProgressCallback progress_callback;  /// Callback for tracking progress of query execution.
@@ -294,10 +300,26 @@ private:
 
 
 public:
+    zkutil::DistributedRWLockPtr ddl_database_lock;
+    zkutil::DistributedRWLockPtr ddl_table_lock;
+
+    struct QueryPlanFragmentInfo
+    {
+        String initial_query_id;
+        int stage_id;   /// Stage that should be executed on this replica.
+        String node_id; /// This is myself replica name and grpc port.
+        std::unordered_map<int, std::vector<std::shared_ptr<String>>> parent_sources; /// Mapping of parent id and its workers.
+        std::vector<std::shared_ptr<String>> sinks;   /// Point to workers that receiving data.
+        bool empty_result_for_aggregation_by_empty_set;
+    };
+
     // Top-level OpenTelemetry trace context for the query. Makes sense only for a query context.
     OpenTelemetryTraceContext query_trace_context;
 
 private:
+    bool skip_distributed_plan = false;
+    std::optional<QueryPlanFragmentInfo> query_plan_fragment_info; /// It has no value if current node is initial compute node.
+
     using SampleBlockCache = std::unordered_map<std::string, Block>;
     mutable SampleBlockCache sample_block_cache;
 
@@ -462,6 +484,7 @@ public:
     StorageID tryResolveStorageID(StorageID storage_id, StorageNamespace where = StorageNamespace::ResolveAll) const;
     StorageID resolveStorageIDImpl(StorageID storage_id, StorageNamespace where, std::optional<Exception> * exception) const;
 
+    ExternalTableHolders getExternalTableHolders() const;
     Tables getExternalTables() const;
     void addExternalTable(const String & table_name, TemporaryTableHolder && temporary_table);
     std::shared_ptr<TemporaryTableHolder> removeExternalTable(const String & table_name);
@@ -500,22 +523,42 @@ public:
     const QueryFactoriesInfo & getQueryFactoriesInfo() const { return query_factories_info; }
     void addQueryFactoriesInfo(QueryLogFactories factory_type, const String & created_object) const;
 
+    bool getSkipDistributedPlan() const { return skip_distributed_plan; }
+    void setSkipDistributedPlan(bool skip) { skip_distributed_plan = skip; }
+
+    bool isInitialQuery() const { return !query_plan_fragment_info; }
+    const QueryPlanFragmentInfo & getQueryPlanFragmentInfo() const { return query_plan_fragment_info.value(); }
+    void setQueryPlanFragmentInfo(const QueryPlanFragmentInfo & query_plan_fragment_info_) { query_plan_fragment_info = query_plan_fragment_info_; }
+    void resetQueryPlanFragmentInfo()
+    {
+        if (query_plan_fragment_info)
+            query_plan_fragment_info.reset();
+    }
+
     StoragePtr executeTableFunction(const ASTPtr & table_expression);
 
     void addViewSource(const StoragePtr & storage);
     StoragePtr getViewSource() const;
 
+    void addInitialContext(const String & plan_fragment_id, const ContextPtr & context);
+    ContextPtr getInitialContext(const String & plan_fragment_id) const;
+    bool isStandaloneMode() const;
+
+    String getSessionID() const;
     String getCurrentDatabase() const;
     String getCurrentQueryId() const { return client_info.current_query_id; }
 
     /// Id of initiating query for distributed queries; or current query id if it's not a distributed query.
     String getInitialQueryId() const;
 
+    void setSessionID(const String & session_id);
+
     void setCurrentDatabase(const String & name);
     /// Set current_database for global context. We don't validate that database
     /// exists because it should be set before databases loading.
     void setCurrentDatabaseNameInGlobalContext(const String & name);
     void setCurrentQueryId(const String & query_id);
+    String generateQueryId() const;
 
     void killCurrentQuery();
 
@@ -741,6 +784,9 @@ public:
     void setDDLWorker(std::unique_ptr<DDLWorker> ddl_worker);
     DDLWorker & getDDLWorker() const;
 
+    void setClustersWatcher(std::unique_ptr<ClustersWatcher> clusters_watcher);
+    ClustersWatcher & getClustersWatcher() const;
+
     std::shared_ptr<Clusters> getClusters() const;
     std::shared_ptr<Cluster> getCluster(const std::string & cluster_name) const;
     std::shared_ptr<Cluster> tryGetCluster(const std::string & cluster_name) const;
@@ -826,6 +872,15 @@ public:
 
     ApplicationType getApplicationType() const;
     void setApplicationType(ApplicationType type);
+
+    enum class RunningMode
+    {
+        COMPUTE,         /// compute server (default)
+        STORE,           /// store server
+    };
+
+    RunningMode getRunningMode() const;
+    void setRunningMode(RunningMode mode);
 
     /// Sets default_profile and system_profile, must be called once during the initialization
     void setDefaultProfiles(const Poco::Util::AbstractConfiguration & config);

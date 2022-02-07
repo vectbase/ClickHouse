@@ -48,10 +48,10 @@ using TableGuards = std::map<UniqueTableName, std::unique_ptr<DDLGuard>>;
 /** Rename one table
   *  or rename many tables at once.
   */
-class InterpreterRenameQuery : public IInterpreter, WithContext
+class InterpreterRenameQuery : public IInterpreter, WithMutableContext
 {
 public:
-    InterpreterRenameQuery(const ASTPtr & query_ptr_, ContextPtr context_);
+    InterpreterRenameQuery(const ASTPtr & query_ptr_, ContextMutablePtr context_);
     BlockIO execute() override;
     void extendQueryLogElemImpl(QueryLogElement & elem, const ASTPtr & ast, ContextPtr) const override;
 

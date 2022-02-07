@@ -83,6 +83,17 @@ public:
             const Requests & requests,
             MultiCallback callback) override;
 
+    void addWatch(
+        const String &path,
+        WatchMode mode,
+        AddWatchCallback callback,
+        WatchCallback watch) override;
+
+    void removeWatches(
+        const String &path,
+        WatchType type,
+        RemoveWatchesCallback callback) override;
+
     void finalize(const String & reason) override;
 
     struct Node

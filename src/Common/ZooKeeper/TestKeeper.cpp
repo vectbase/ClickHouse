@@ -125,6 +125,18 @@ struct TestKeeperListRequest final : ListRequest, TestKeeperRequest
     std::pair<ResponsePtr, Undo> process(TestKeeper::Container & container, int64_t zxid) const override;
 };
 
+struct TestKeeperAddWatchRequest final : AddWatchRequest, TestKeeperRequest
+{
+    ResponsePtr createResponse() const override;
+    std::pair<ResponsePtr, Undo> process(TestKeeper::Container & container, int64_t zxid) const override;
+};
+
+struct TestKeeperRemoveWatchesRequest final : RemoveWatchesRequest, TestKeeperRequest
+{
+    ResponsePtr createResponse() const override;
+    std::pair<ResponsePtr, Undo> process(TestKeeper::Container & container, int64_t zxid) const override;
+};
+
 struct TestKeeperCheckRequest final : CheckRequest, TestKeeperRequest
 {
     TestKeeperCheckRequest() = default;
@@ -393,6 +405,28 @@ std::pair<ResponsePtr, Undo> TestKeeperListRequest::process(TestKeeper::Containe
     return { std::make_shared<ListResponse>(response), {} };
 }
 
+std::pair<ResponsePtr, Undo> TestKeeperAddWatchRequest::process(TestKeeper::Container & container, int64_t) const
+{
+    AddWatchResponse response;
+    auto it = container.find(path);
+    if (it == container.end())
+    {
+        response.error = Error::ZNONODE;
+    }
+    else
+    {
+        /// TODO add logic
+    }
+    return {std::make_shared<AddWatchResponse>(response), {}};
+}
+
+std::pair<ResponsePtr, Undo> TestKeeperRemoveWatchesRequest::process(TestKeeper::Container &, int64_t) const
+{
+    // TODO add logic
+    RemoveWatchesResponse response;
+    return {std::make_shared<RemoveWatchesResponse>(response), {}};
+}
+
 std::pair<ResponsePtr, Undo> TestKeeperCheckRequest::process(TestKeeper::Container & container, int64_t) const
 {
     CheckResponse response;
@@ -472,6 +506,8 @@ ResponsePtr TestKeeperSetRequest::createResponse() const { return std::make_shar
 ResponsePtr TestKeeperListRequest::createResponse() const { return std::make_shared<ListResponse>(); }
 ResponsePtr TestKeeperCheckRequest::createResponse() const { return std::make_shared<CheckResponse>(); }
 ResponsePtr TestKeeperMultiRequest::createResponse() const { return std::make_shared<MultiResponse>(); }
+ResponsePtr TestKeeperAddWatchRequest::createResponse() const { return std::make_shared<AddWatchResponse>(); }
+ResponsePtr TestKeeperRemoveWatchesRequest::createResponse() const { return std::make_shared<RemoveWatchesResponse>(); }
 
 
 TestKeeper::TestKeeper(const String & root_path_, Poco::Timespan operation_timeout_)
@@ -791,4 +827,36 @@ void TestKeeper::multi(
     pushRequest(std::move(request_info));
 }
 
+void TestKeeper::addWatch(
+    const String &path,
+    WatchMode mode,
+    AddWatchCallback callback,
+    WatchCallback watch)
+{
+    TestKeeperAddWatchRequest request;
+    request.path = path;
+    request.mode = mode;
+
+    RequestInfo request_info;
+    request_info.request = std::make_shared<TestKeeperAddWatchRequest>(std::move(request));
+    request_info.callback = [callback](const Response & response) { callback(dynamic_cast<const AddWatchResponse &>(response)); };
+    request_info.watch = watch;
+    pushRequest(std::move(request_info));
+}
+
+/// For the given znode path, removes the specified watcher of given watchType.
+void TestKeeper::removeWatches(
+    const String &path,
+    WatchType type,
+    RemoveWatchesCallback callback)
+{
+    TestKeeperRemoveWatchesRequest request;
+    request.path = path;
+    request.type = type;
+
+    RequestInfo request_info;
+    request_info.request = std::make_shared<TestKeeperRemoveWatchesRequest>(std::move(request));
+    request_info.callback = [callback](const Response & response) { callback(dynamic_cast<const RemoveWatchesResponse &>(response)); };
+    pushRequest(std::move(request_info));
+}
 }

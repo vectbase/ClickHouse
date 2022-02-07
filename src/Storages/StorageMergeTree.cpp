@@ -27,6 +27,7 @@
 #include <Storages/MergeTree/PartitionPruner.h>
 #include <Storages/MergeTree/MergeList.h>
 #include <Storages/MergeTree/checkDataPart.h>
+#include <Storages/StorageDistributed.h>
 #include <QueryPipeline/Pipe.h>
 #include <Processors/QueryPlan/QueryPlan.h>
 #include <Processors/QueryPlan/BuildQueryPipelineSettings.h>
@@ -67,7 +68,8 @@ StorageMergeTree::StorageMergeTree(
     const String & date_column_name,
     const MergingParams & merging_params_,
     std::unique_ptr<MergeTreeSettings> storage_settings_,
-    bool has_force_restore_data_flag)
+    bool has_force_restore_data_flag,
+    StoragePtr embedded_distributed_)
     : MergeTreeData(
         table_id_,
         relative_data_path_,
@@ -83,6 +85,7 @@ StorageMergeTree::StorageMergeTree(
     , merger_mutator(*this,
         getContext()->getSettingsRef().background_merges_mutations_concurrency_ratio *
         getContext()->getSettingsRef().background_pool_size)
+    , embedded_distributed(embedded_distributed_)
 {
     loadDataParts(has_force_restore_data_flag);
 
@@ -230,6 +233,11 @@ std::optional<UInt64> StorageMergeTree::totalBytes(const Settings &) const
 SinkToStoragePtr
 StorageMergeTree::write(const ASTPtr & /*query*/, const StorageMetadataPtr & metadata_snapshot, ContextPtr local_context)
 {
+    if (getContext()->getRunningMode() == Context::RunningMode::COMPUTE && getStorageID().getDatabaseName() != DatabaseCatalog::SYSTEM_DATABASE)
+    {
+        return embedded_distributed->write(nullptr, metadata_snapshot, local_context);
+    }
+
     const auto & settings = local_context->getSettingsRef();
     return std::make_shared<MergeTreeSink>(
         *this, metadata_snapshot, settings.max_partitions_per_insert_block, local_context);
@@ -1497,6 +1505,28 @@ void StorageMergeTree::onActionLockRemove(StorageActionBlockType action_type)
         background_operations_assignee.trigger();
     else if (action_type == ActionLocks::PartsMove)
         background_moves_assignee.trigger();
+}
+
+void StorageMergeTree::rename(const String & new_path_to_table_data, const StorageID & new_table_id)
+{
+    renameInMemory(new_table_id);
+    MergeTreeData::rename(new_path_to_table_data, new_table_id);
+}
+
+void StorageMergeTree::renameInMemory(const StorageID & new_table_id)
+{
+    if (embedded_distributed)
+    {
+        auto embedded_distributed_table = std::dynamic_pointer_cast<StorageDistributed>(embedded_distributed);
+        if (!embedded_distributed_table)
+            throw Exception(
+                "Table " + getStorageID().getNameForLogs() + " embedded_distributed only for StorageDistributed table engine.",
+                ErrorCodes::NOT_IMPLEMENTED);
+        embedded_distributed_table->setRemoteDatabaseName(new_table_id.database_name);
+        embedded_distributed_table->setRemoteTableName(new_table_id.table_name);
+        embedded_distributed->renameInMemory(new_table_id);
+    }
+    IStorage::renameInMemory(new_table_id);
 }
 
 CheckResults StorageMergeTree::checkData(const ASTPtr & query, ContextPtr local_context)

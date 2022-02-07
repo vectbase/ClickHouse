@@ -146,6 +146,8 @@ public:
 
     void rename(const String & new_path_to_table_data, const StorageID & new_table_id) override;
 
+    void renameInMemory(const StorageID & new_table_id) override;
+
     bool supportsIndexForIn() const override { return true; }
 
     void checkTableCanBeDropped() const override;
@@ -392,6 +394,8 @@ private:
     /// speed.
     ThrottlerPtr replicated_fetches_throttler;
     ThrottlerPtr replicated_sends_throttler;
+
+    StoragePtr embedded_distributed;
 
     template <class Func>
     void foreachCommittedParts(Func && func, bool select_sequential_consistency) const;
@@ -743,7 +747,8 @@ protected:
         const MergingParams & merging_params_,
         std::unique_ptr<MergeTreeSettings> settings_,
         bool has_force_restore_data_flag,
-        bool allow_renaming_);
+        bool allow_renaming_,
+        StoragePtr embedded_distributed_);
 };
 
 String getPartNamePossiblyFake(MergeTreeDataFormatVersion format_version, const MergeTreePartInfo & part_info);

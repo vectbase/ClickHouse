@@ -144,6 +144,8 @@ void ListRequest::addRootPath(const String & root_path) { Coordination::addRootP
 void CheckRequest::addRootPath(const String & root_path) { Coordination::addRootPath(path, root_path); }
 void SetACLRequest::addRootPath(const String & root_path) { Coordination::addRootPath(path, root_path); }
 void GetACLRequest::addRootPath(const String & root_path) { Coordination::addRootPath(path, root_path); }
+void AddWatchRequest::addRootPath(const String & root_path) { Coordination::addRootPath(path, root_path); }
+void RemoveWatchesRequest::addRootPath(const String & root_path) { Coordination::addRootPath(path, root_path); }
 
 void MultiRequest::addRootPath(const String & root_path)
 {

@@ -381,6 +381,7 @@ static std::tuple<ASTPtr, BlockIO> executeQueryImpl(
     const auto current_time = std::chrono::system_clock::now();
 
     auto & client_info = context->getClientInfo();
+    client_info.initial_query = String(begin, end);
 
     // If it's not an internal query and we don't see an initial_query_start_time yet, initialize it
     // to current time. Internal queries are those executed without an independent client context,
@@ -401,9 +402,10 @@ static std::tuple<ASTPtr, BlockIO> executeQueryImpl(
     ASTPtr ast;
     const char * query_end;
 
-    /// Don't limit the size of internal queries.
-    size_t max_query_size = 0;
-    if (!internal) max_query_size = settings.max_query_size;
+    size_t max_query_size = settings.max_query_size;
+    /// Don't limit the size of internal queries or distributed subquery.
+    if (internal || client_info.query_kind == ClientInfo::QueryKind::SECONDARY_QUERY)
+        max_query_size = 0;
 
     String query_database;
     String query_table;

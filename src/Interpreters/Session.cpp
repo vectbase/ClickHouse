@@ -19,6 +19,7 @@
 #include <mutex>
 #include <unordered_map>
 #include <vector>
+#include <chrono>
 
 
 namespace DB
@@ -90,6 +91,95 @@ public:
         thread.join();
     }
 
+    void initializeRemoteSession (const std::shared_ptr<NamedSessionData> & session) {
+        auto zookeeper = session->context->getZooKeeper();
+
+        auto zookeeper_path = fs::path(DEFAULT_ZOOKEEPER_SESSIONS_PATH) / session->key.second;
+        if(zookeeper->exists(zookeeper_path))
+            return;
+
+        zookeeper->createAncestors(zookeeper_path / "");
+        const auto now = std::chrono::system_clock::now();
+        const auto timestamp = std::chrono::duration_cast<std::chrono::seconds>(now.time_since_epoch()).count();
+        Coordination::Requests requests;
+        requests.emplace_back(zkutil::makeCreateRequest(zookeeper_path / "user_id", toString(session->key.first), zkutil::CreateMode::Persistent));
+        requests.emplace_back(zkutil::makeCreateRequest(zookeeper_path / "creation_timestamp", toString(timestamp), zkutil::CreateMode::Persistent));
+        requests.emplace_back(zkutil::makeCreateRequest(zookeeper_path / "session_timeout", toString(std::chrono::duration<double>(session->timeout).count()), zkutil::CreateMode::Persistent));
+        zookeeper->multi(requests);
+    }
+
+    void applySessionContextSettings(const std::shared_ptr<NamedSessionData> & session) {
+        session->context->setSessionID(session->key.second);
+
+        auto zookeeper = session->context->getZooKeeper();
+        auto zookeeper_path = fs::path(DEFAULT_ZOOKEEPER_SESSIONS_PATH) / session->key.second;
+        if(!zookeeper->exists(zookeeper_path))
+        {
+            LOG_WARNING(log, "Session {} not found in meta service", session->key.second);
+            return;
+        }
+
+        String current_database;
+        zookeeper->tryGet(zookeeper_path / "current_database", current_database);
+        if (!current_database.empty())
+        {
+            session->context->setCurrentDatabase(current_database);
+            LOG_DEBUG(log, "Session {} apply current database {}", session->key.second, current_database);
+        }
+
+        String current_roles;
+        zookeeper->tryGet(zookeeper_path / "current_roles", current_roles);
+        if (!current_roles.empty())
+        {
+            Strings roles_string;
+            boost::algorithm::split(roles_string, current_roles, boost::is_any_of(","));
+            std::vector<UUID> roles;
+            roles.reserve(roles_string.size());
+            for (const auto & role : roles)
+                roles.emplace_back(UUID(role));
+
+            session->context->setCurrentRoles(roles);
+            LOG_DEBUG(log, "Session {} apply current roles {}", session->key.second, current_roles);
+        }
+
+        Strings setting_changes;
+        zookeeper->tryGetChildren(zookeeper_path / "setting_changes", setting_changes);
+        for (auto & name : setting_changes)
+        {
+            String value;
+            zookeeper->tryGet(zookeeper_path / "setting_changes" / name, value);
+            if (!value.empty())
+            {
+                session->context->applySettingChange(SettingChange{name, value});
+                LOG_DEBUG(
+                    log,
+                    "Session {} apply setting change {}={}",
+                    session->key.second,
+                    name,
+                    value);
+            }
+        }
+
+        String creation_timestamp;
+        zookeeper->tryGet(zookeeper_path / "creation_timestamp", creation_timestamp);
+        String session_timeout;
+        zookeeper->tryGet(zookeeper_path / "session_timeout", session_timeout);
+        if (!creation_timestamp.empty())
+        {
+            const auto now = std::chrono::system_clock::now();
+            const auto timestamp = std::chrono::duration_cast<std::chrono::seconds>(now.time_since_epoch()).count();
+            const auto elapsed = timestamp - std::stoll(creation_timestamp);
+            if (elapsed >= 0)
+            {
+                const auto timeout_seconds = std::stoll(session_timeout) - elapsed;
+                session->timeout = std::chrono::seconds(timeout_seconds);
+                LOG_DEBUG(log, "Session {} apply session timeout {}s", session->key.second, timeout_seconds);
+            }
+            else
+                throw Exception("Current server timestamp is smaller than the creation timestamp of session", ErrorCodes::LOGICAL_ERROR);
+        }
+    }
+
     /// Find existing session or create a new.
     std::pair<std::shared_ptr<NamedSessionData>, bool> acquireSession(
         const ContextPtr & global_context,
@@ -113,6 +203,12 @@ public:
             it = sessions.insert(std::make_pair(key, std::make_shared<NamedSessionData>(key, context, timeout, *this))).first;
             const auto & session = it->second;
 
+            if (global_context->getRunningMode() == Context::RunningMode::COMPUTE)
+            {
+                initializeRemoteSession(session);
+                applySessionContextSettings(session);
+            }
+
             if (!thread.joinable())
                 thread = ThreadFromGlobalPool{&NamedSessionsStorage::cleanThread, this};
 
@@ -125,6 +221,12 @@ public:
 
             if (!session.unique())
                 throw Exception("Session is locked by a concurrent client.", ErrorCodes::SESSION_IS_LOCKED);
+
+            if (global_context->getRunningMode() == Context::RunningMode::COMPUTE)
+            {
+                applySessionContextSettings(session);
+            }
+
             return {session, false};
         }
     }
@@ -218,7 +320,13 @@ private:
                     scheduleCloseSession(*session->second, lock);
                 }
                 else
+                {
+                    auto zookeeper = session->second->context->getZooKeeper();
+                    auto zookeeper_path = fs::path(DEFAULT_ZOOKEEPER_SESSIONS_PATH) / session->second->context->getSessionID();
+                    zookeeper->tryRemoveRecursive(zookeeper_path);
+                    LOG_DEBUG(log, "Delete session {}", session->second->context->getSessionID());
                     sessions.erase(session);
+                }
             }
         }
 
@@ -230,6 +338,7 @@ private:
     std::condition_variable cond;
     ThreadFromGlobalPool thread;
     bool quit = false;
+    Poco::Logger * log = &Poco::Logger::get("NamedSessionsStorage");
 };
 
 

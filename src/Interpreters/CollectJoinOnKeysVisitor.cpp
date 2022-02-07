@@ -243,6 +243,9 @@ JoinIdentifierPos CollectJoinOnKeysMatcher::getTableForIdentifiers(const ASTPtr 
                         in_right_table = false;
                     in_left_table = !in_right_table;
                 }
+                /// Consider it's in left table if has no table name.
+                else if (identifier->isShort())
+                    in_right_table = false;
                 else
                     throw Exception("Column '" + name + "' is ambiguous", ErrorCodes::AMBIGUOUS_COLUMN_NAME);
             }

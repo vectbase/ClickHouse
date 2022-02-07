@@ -65,6 +65,7 @@
 
 #include <TableFunctions/TableFunctionFactory.h>
 #include <base/logger_useful.h>
+#include <Common/ZooKeeper/DistributedRWLock.h>
 
 
 namespace DB
@@ -88,6 +89,7 @@ namespace ErrorCodes
     extern const int UNKNOWN_DATABASE;
     extern const int PATH_ACCESS_DENIED;
     extern const int NOT_IMPLEMENTED;
+    extern const int CANNOT_CREATE_DATABASE;
 }
 
 namespace fs = std::filesystem;
@@ -102,7 +104,14 @@ BlockIO InterpreterCreateQuery::createDatabase(ASTCreateQuery & create)
 {
     String database_name = create.database;
 
-    auto guard = DatabaseCatalog::instance().getDDLGuard(database_name, "");
+    /// If the statement is not from ddl and not internal, that is from the user, the database requires distributed ddl guard
+    if (!getContext()->getClientInfo().is_replicated_database_internal && !internal)
+    {
+        if (database_name != "system")
+        {
+            getContext()->ddl_database_lock = zkutil::DistributedRWLock::tryLock(getContext()->getZooKeeper(), false, database_name);
+        }
+    }
 
     /// Database can be created before or it can be created concurrently in another thread, while we were waiting in DDLGuard
     if (DatabaseCatalog::instance().isDatabaseExist(database_name))
@@ -132,19 +141,22 @@ BlockIO InterpreterCreateQuery::createDatabase(ASTCreateQuery & create)
         create.attach_short_syntax = true;
         create.database = database_name;
     }
-    else if (!create.storage)
+    else if (!create.storage || create.storage->engine->name == "Replicated")
     {
         /// For new-style databases engine is explicitly specified in .sql
         /// When attaching old-style database during server startup, we must always use Ordinary engine
-        if (create.attach)
+        if (!create.storage && create.attach)
             throw Exception("Database engine must be specified for ATTACH DATABASE query", ErrorCodes::UNKNOWN_DATABASE_ENGINE);
-        bool old_style_database = getContext()->getSettingsRef().default_database_engine.value == DefaultDatabaseEngine::Ordinary;
         auto engine = std::make_shared<ASTFunction>();
         auto storage = std::make_shared<ASTStorage>();
-        engine->name = old_style_database ? "Ordinary" : "Atomic";
-        engine->no_empty_args = true;
+        auto args = std::make_shared<ASTExpressionList>();
+        args->children.emplace_back(std::make_shared<ASTLiteral>(String(fs::path(DEFAULT_ZOOKEEPER_METADATA_PATH) / create.database)));
+        args->children.emplace_back(std::make_shared<ASTLiteral>(String("{shard}")));
+        args->children.emplace_back(std::make_shared<ASTLiteral>(String("{replica}")));
+        engine->name = "Replicated";
+        engine->arguments = args;
         storage->set(storage->engine, engine);
-        create.set(create.storage, storage);
+        create.setOrReplace(create.storage, storage);
     }
     else if ((create.columns_list
               && ((create.columns_list->indices && !create.columns_list->indices->children.empty())
@@ -234,6 +246,15 @@ BlockIO InterpreterCreateQuery::createDatabase(ASTCreateQuery & create)
                         "Enable allow_experimental_database_materialized_postgresql to use it.", ErrorCodes::UNKNOWN_DATABASE_ENGINE);
     }
 
+    if (!getContext()->getClientInfo().is_replicated_database_internal && !internal)
+    {
+        auto * ptr = typeid_cast<DatabaseReplicated *>(
+            DatabaseCatalog::instance().getDatabase(getContext()->getConfigRef().getString("default_database", "default")).get());
+        if (!ptr)
+            throw Exception("The default database is not Replicated engine", ErrorCodes::LOGICAL_ERROR);
+        return ptr->tryEnqueueReplicatedDDL(query_ptr, getContext());
+    }
+
     DatabasePtr database = DatabaseFactory::get(create, metadata_path / "", getContext());
 
     if (create.uuid != UUIDHelpers::Nil)
@@ -261,13 +282,35 @@ BlockIO InterpreterCreateQuery::createDatabase(ASTCreateQuery & create)
         out.close();
     }
 
-    /// We attach database before loading it's tables, so do not allow concurrent DDL queries
-    auto db_guard = DatabaseCatalog::instance().getExclusiveDDLGuardForDatabase(database_name);
+    auto create_database_nodes_in_zookeeper = [this, &database_name] (ZooKeeperMetadataTransactionPtr txn)
+    {
+        auto zookeeper_path = fs::path(DEFAULT_ZOOKEEPER_METADATA_PATH) / database_name;
+        getContext()->getZooKeeper()->createAncestors(zookeeper_path);
 
+        txn->addOp(zkutil::makeCreateRequest(zookeeper_path, "", zkutil::CreateMode::Persistent));
+        txn->addOp(zkutil::makeCreateRequest(zookeeper_path / "log", "", zkutil::CreateMode::Persistent));
+        txn->addOp(zkutil::makeCreateRequest(zookeeper_path / "replicas", "", zkutil::CreateMode::Persistent));
+        txn->addOp(zkutil::makeCreateRequest(zookeeper_path / "counter", "", zkutil::CreateMode::Persistent));
+        /// We create and remove counter/cnt- node to increment sequential number of counter/ node and make log entry numbers start from 1.
+        /// New replicas are created with log pointer equal to 0 and log pointer is a number of the last executed entry.
+        /// It means that we cannot have log entry with number 0.
+        txn->addOp(zkutil::makeCreateRequest(zookeeper_path / "counter/cnt-", "", zkutil::CreateMode::Persistent));
+        txn->addOp(zkutil::makeRemoveRequest(zookeeper_path / "counter/cnt-", -1));
+        txn->addOp(zkutil::makeCreateRequest(zookeeper_path / "metadata", "", zkutil::CreateMode::Persistent));
+        txn->addOp(zkutil::makeCreateRequest(zookeeper_path / "max_log_ptr", "1", zkutil::CreateMode::Persistent));
+        txn->addOp(zkutil::makeCreateRequest(zookeeper_path / "logs_to_keep", "1000", zkutil::CreateMode::Persistent));
+    };
     bool added = false;
     bool renamed = false;
     try
     {
+        if (getContext()->getClientInfo().is_replicated_database_internal && !internal)
+        {
+            auto * ptr = typeid_cast<DatabaseReplicated *>(
+                DatabaseCatalog::instance().getDatabase(getContext()->getConfigRef().getString("default_database", "default")).get());
+            ptr->commitDatabase(getContext(), create_database_nodes_in_zookeeper);
+        }
+
         /// TODO Attach db only after it was loaded. Now it's not possible because of view dependencies
         DatabaseCatalog::instance().attachDatabase(database_name, database);
         added = true;
@@ -827,11 +870,19 @@ BlockIO InterpreterCreateQuery::createTable(ASTCreateQuery & create)
 {
     /// Temporary tables are created out of databases.
     if (create.temporary && !create.database.empty())
-        throw Exception("Temporary tables cannot be inside a database. You should not specify a database for a temporary table.",
+        throw Exception(
+            "Temporary tables cannot be inside a database. You should not specify a database for a temporary table.",
             ErrorCodes::BAD_DATABASE_FOR_TEMPORARY_TABLE);
 
     String current_database = getContext()->getCurrentDatabase();
     auto database_name = create.database.empty() ? current_database : create.database;
+
+    if (!getContext()->getClientInfo().is_replicated_database_internal && !internal && database_name != "system")
+    {
+        getContext()->ddl_database_lock = zkutil::DistributedRWLock::tryLock(getContext()->getZooKeeper(), true, database_name);
+        getContext()->ddl_table_lock = zkutil::DistributedRWLock::tryLock(getContext()->getZooKeeper(), false, database_name, create.table);
+    }
+
 
     // If this is a stub ATTACH query, read the query definition from the database
     if (create.attach && !create.storage && !create.columns_list)
@@ -1104,7 +1155,7 @@ BlockIO InterpreterCreateQuery::doCreateOrReplaceTable(ASTCreateQuery & create,
                                                        const InterpreterCreateQuery::TableProperties & properties)
 {
     /// Replicated database requires separate contexts for each DDL query
-    ContextPtr current_context = getContext();
+    ContextMutablePtr current_context = getContext();
     ContextMutablePtr create_context = Context::createCopy(current_context);
     create_context->setQueryContext(std::const_pointer_cast<Context>(current_context));
 
@@ -1176,6 +1227,7 @@ BlockIO InterpreterCreateQuery::doCreateOrReplaceTable(ASTCreateQuery & create,
             ASTRenameQuery::Table{create.database, table_to_replace_name}
         };
 
+        ast_rename->is_initial = false;
         ast_rename->elements.push_back(std::move(elem));
         ast_rename->dictionary = create.is_dictionary;
         if (create.create_or_replace)
@@ -1219,12 +1271,17 @@ BlockIO InterpreterCreateQuery::doCreateOrReplaceTable(ASTCreateQuery & create,
     }
 }
 
-BlockIO InterpreterCreateQuery::fillTableIfNeeded(const ASTCreateQuery & create)
+BlockIO InterpreterCreateQuery::fillTableIfNeeded(const ASTCreateQuery & create, bool need_fill)
 {
     /// If the query is a CREATE SELECT, insert the data into the table.
     if (create.select && !create.attach
         && !create.is_ordinary_view && !create.is_live_view && (!create.is_materialized_view || create.is_populate))
     {
+        auto database = DatabaseCatalog::instance().getDatabase(create.database);
+        if (getContext()->getSettingsRef().allow_experimental_database_replicated && database->getEngineName() == "Replicated"
+            && !need_fill)
+            return {};
+
         auto insert = std::make_shared<ASTInsertQuery>();
         insert->table_id = {create.database, create.table, create.uuid};
         insert->select = create.select->clone();

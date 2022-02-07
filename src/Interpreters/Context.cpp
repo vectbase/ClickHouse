@@ -149,6 +149,7 @@ struct ContextSharedPart
     mutable std::mutex external_dictionaries_mutex;
     mutable std::mutex external_user_defined_executable_functions_mutex;
     mutable std::mutex external_models_mutex;
+    mutable std::mutex initial_contexts_mutex;
     /// Separate mutex for storage policies. During server startup we may
     /// initialize some important storages (system logs with MergeTree engine)
     /// under context lock.
@@ -188,6 +189,7 @@ struct ContextSharedPart
     mutable std::optional<ExternalDictionariesLoader> external_dictionaries_loader;
     mutable std::optional<ExternalUserDefinedExecutableFunctionsLoader> external_user_defined_executable_functions_loader;
     mutable std::optional<ExternalModelsLoader> external_models_loader;
+    std::unordered_map<String, ContextPtr> initial_contexts; /// Retrieve view source or input function in different plan fragments.
 
     ExternalLoaderXMLConfigRepository * external_models_config_repository = nullptr;
     scope_guard models_repository_guard;
@@ -228,6 +230,7 @@ struct ContextSharedPart
 
     MultiVersion<Macros> macros;                            /// Substitutions extracted from config.
     std::unique_ptr<DDLWorker> ddl_worker;                  /// Process ddl commands from zk.
+    std::unique_ptr<ClustersWatcher> clusters_watcher;
     /// Rules for selecting the compression settings, depending on the size of the part.
     mutable std::unique_ptr<CompressionCodecSelector> compression_codec_selector;
     /// Storage disk chooser for MergeTree engines
@@ -272,6 +275,8 @@ struct ContextSharedPart
     Stopwatch uptime_watch;
 
     Context::ApplicationType application_type = Context::ApplicationType::SERVER;
+
+    Context::RunningMode running_mode = Context::RunningMode::COMPUTE;
 
     /// vector of xdbc-bridge commands, they will be killed when Context will be destroyed
     std::vector<std::unique_ptr<ShellCommand>> bridge_commands;
@@ -371,6 +376,7 @@ struct ContextSharedPart
             distributed_schedule_pool.reset();
             message_broker_schedule_pool.reset();
             ddl_worker.reset();
+            clusters_watcher.reset();
             access_control_manager.reset();
 
             /// Stop trace collector if any
@@ -891,6 +897,29 @@ const Block * Context::tryGetLocalScalar(const String & name) const
     return &it->second;
 }
 
+ExternalTableHolders Context::getExternalTableHolders() const
+{
+    assert(!isGlobalContext() || getApplicationType() == ApplicationType::LOCAL);
+    auto lock = getLock();
+
+    ExternalTableHolders res;
+    res.insert(external_tables_mapping.begin(), external_tables_mapping.end());
+
+    auto query_context_ptr = query_context.lock();
+    auto session_context_ptr = session_context.lock();
+    if (query_context_ptr && query_context_ptr.get() != this)
+    {
+        ExternalTableHolders buf = query_context_ptr->getExternalTableHolders();
+        res.insert(buf.begin(), buf.end());
+    }
+    else if (session_context_ptr && session_context_ptr.get() != this)
+    {
+        ExternalTableHolders buf = session_context_ptr->getExternalTableHolders();
+        res.insert(buf.begin(), buf.end());
+    }
+    return res;
+}
+
 Tables Context::getExternalTables() const
 {
     assert(!isGlobalContext() || getApplicationType() == ApplicationType::LOCAL);
@@ -914,7 +943,6 @@ Tables Context::getExternalTables() const
     }
     return res;
 }
-
 
 void Context::addExternalTable(const String & table_name, TemporaryTableHolder && temporary_table)
 {
@@ -1053,6 +1081,28 @@ StoragePtr Context::getViewSource() const
     return view_source;
 }
 
+void Context::addInitialContext(const String & plan_fragment_id, const ContextPtr & context)
+{
+    std::lock_guard lock(shared->initial_contexts_mutex);
+    shared->initial_contexts[plan_fragment_id] = context;
+}
+
+ContextPtr Context::getInitialContext(const String & plan_fragment_id) const
+{
+    std::lock_guard lock(shared->initial_contexts_mutex);
+    auto it = shared->initial_contexts.find(plan_fragment_id);
+    if (it == shared->initial_contexts.end())
+        throw Exception(ErrorCodes::BAD_GET, "There is no initial context for {}", plan_fragment_id);
+    ContextPtr initial_query_context = it->second;
+    shared->initial_contexts.erase(it);
+    return initial_query_context;
+}
+
+bool Context::isStandaloneMode() const
+{
+    return (!getSettingsRef().enable_distributed_plan || (isInitialQuery() && getRunningMode() == Context::RunningMode::STORE));
+}
+
 Settings Context::getSettings() const
 {
     auto lock = getLock();
@@ -1158,6 +1208,12 @@ std::shared_ptr<const SettingsConstraintsAndProfileIDs> Context::getSettingsCons
 }
 
 
+String Context::getSessionID() const
+{
+    auto lock = getLock();
+    return session_id;
+}
+
 String Context::getCurrentDatabase() const
 {
     auto lock = getLock();
@@ -1183,6 +1239,12 @@ void Context::setCurrentDatabaseNameInGlobalContext(const String & name)
                         ErrorCodes::LOGICAL_ERROR);
 
     current_database = name;
+}
+
+void Context::setSessionID(const String & id)
+{
+    auto lock = getLock();
+    session_id = id;
 }
 
 void Context::setCurrentDatabase(const String & name)
@@ -1254,6 +1316,34 @@ void Context::setCurrentQueryId(const String & query_id)
 
     if (client_info.query_kind == ClientInfo::QueryKind::INITIAL_QUERY)
         client_info.initial_query_id = client_info.current_query_id;
+}
+
+String Context::generateQueryId() const
+{
+    /// Generate random UUID, but using lower quality RNG,
+    ///  because Poco::UUIDGenerator::generateRandom method is using /dev/random, that is very expensive.
+    /// NOTE: Actually we don't need to use UUIDs for query identifiers.
+    /// We could use any suitable string instead.
+    union
+    {
+        char bytes[16];
+        struct
+        {
+            UInt64 a;
+            UInt64 b;
+        } words;
+        UUID uuid{};
+    } random;
+
+    random.words.a = thread_local_rng(); //-V656
+    random.words.b = thread_local_rng(); //-V656
+
+    /// Use protected constructor.
+    struct QueryUUID : Poco::UUID
+    {
+        QueryUUID(const char * bytes, Poco::UUID::Version version) : Poco::UUID(bytes, version) { }
+    };
+    return QueryUUID(random.bytes, Poco::UUID::UUID_RANDOM).toString();
 }
 
 void Context::killCurrentQuery()
@@ -1793,6 +1883,20 @@ DDLWorker & Context::getDDLWorker() const
         throw Exception("DDL background thread is not initialized", ErrorCodes::NO_ELEMENTS_IN_CONFIG);
     }
     return *shared->ddl_worker;
+}
+
+void Context::setClustersWatcher(std::unique_ptr<ClustersWatcher> clusters_watcher)
+{
+    auto lock = getLock();
+    if (shared->clusters_watcher)
+        throw Exception("ClustersWatcher has already been initialized", ErrorCodes::LOGICAL_ERROR);
+    clusters_watcher->startup();
+    shared->clusters_watcher = std::move(clusters_watcher);
+}
+
+ClustersWatcher & Context::getClustersWatcher() const
+{
+    return *shared->clusters_watcher;
 }
 
 zkutil::ZooKeeperPtr Context::getZooKeeper() const
@@ -2636,6 +2740,17 @@ void Context::setApplicationType(ApplicationType type)
 {
     /// Lock isn't required, you should set it at start
     shared->application_type = type;
+}
+
+Context::RunningMode Context::getRunningMode() const
+{
+    return shared->running_mode;
+}
+
+void Context::setRunningMode(RunningMode mode)
+{
+    /// Lock isn't required, you should set it at start
+    shared->running_mode = mode;
 }
 
 void Context::setDefaultProfiles(const Poco::Util::AbstractConfiguration & config)
