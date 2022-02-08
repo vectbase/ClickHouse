@@ -17,10 +17,9 @@ private:
 
 public:
     ParserKeyword(const char * s_);
-
-protected:
     const char * getName() const override;
 
+protected:
     bool parseImpl(Pos & pos, ASTPtr & node, Expected & expected) override;
 };
 

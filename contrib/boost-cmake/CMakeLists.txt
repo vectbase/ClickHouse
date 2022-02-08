@@ -13,6 +13,8 @@ if (NOT USE_INTERNAL_BOOST_LIBRARY)
         regex
         context
         coroutine
+        date_time
+        thread
     )
 
     if(Boost_INCLUDE_DIR AND Boost_FILESYSTEM_LIBRARY AND Boost_FILESYSTEM_LIBRARY AND
@@ -32,6 +34,8 @@ if (NOT USE_INTERNAL_BOOST_LIBRARY)
         add_library (_boost_system INTERFACE)
         add_library (_boost_context INTERFACE)
         add_library (_boost_coroutine INTERFACE)
+        add_library (_boost_date_time INTERFACE)
+        add_library (_boost_thread INTERFACE)
 
         target_link_libraries (_boost_filesystem INTERFACE ${Boost_FILESYSTEM_LIBRARY})
         target_link_libraries (_boost_iostreams INTERFACE ${Boost_IOSTREAMS_LIBRARY})
@@ -40,6 +44,8 @@ if (NOT USE_INTERNAL_BOOST_LIBRARY)
         target_link_libraries (_boost_system INTERFACE ${Boost_SYSTEM_LIBRARY})
         target_link_libraries (_boost_context INTERFACE ${Boost_CONTEXT_LIBRARY})
         target_link_libraries (_boost_coroutine INTERFACE ${Boost_COROUTINE_LIBRARY})
+        target_link_libraries (_boost_date_time INTERFACE ${Boost_DATE_TIME_LIBRARY})
+        target_link_libraries (_boost_thread INTERFACE ${Boost_THREAD_LIBRARY})
 
         add_library (boost::filesystem ALIAS _boost_filesystem)
         add_library (boost::iostreams ALIAS _boost_iostreams)
@@ -48,6 +54,8 @@ if (NOT USE_INTERNAL_BOOST_LIBRARY)
         add_library (boost::system ALIAS _boost_system)
         add_library (boost::context ALIAS _boost_context)
         add_library (boost::coroutine ALIAS _boost_coroutine)
+        add_library (boost::date_time ALIAS _boost_date_time)
+        add_library (boost::thread ALIAS _boost_thread)
     else()
         set(EXTERNAL_BOOST_FOUND 0)
         message (${RECONFIGURE_MESSAGE_LEVEL} "Can't find system boost")
@@ -220,4 +228,33 @@ if (NOT EXTERNAL_BOOST_FOUND)
     add_library (boost::coroutine ALIAS _boost_coroutine)
     target_include_directories (_boost_coroutine PRIVATE ${LIBRARY_DIR})
     target_link_libraries(_boost_coroutine PRIVATE _boost_context)
+
+    # date_time
+
+    set (SRCS_DATE_TIME
+            ${LIBRARY_DIR}/libs/date_time/src/gregorian/date_generators.cpp
+            ${LIBRARY_DIR}/libs/date_time/src/gregorian/greg_month.cpp
+            ${LIBRARY_DIR}/libs/date_time/src/gregorian/greg_names.hpp
+            ${LIBRARY_DIR}/libs/date_time/src/gregorian/greg_weekday.cpp
+            ${LIBRARY_DIR}/libs/date_time/src/gregorian/gregorian_types.cpp
+            ${LIBRARY_DIR}/libs/date_time/src/posix_time/posix_time_types.cpp
+            )
+    add_library (_boost_date_time ${SRCS_DATE_TIME})
+    add_library (boost::date_time ALIAS _boost_date_time)
+    target_include_directories (_boost_date_time PRIVATE ${LIBRARY_DIR})
+    target_link_libraries(_boost_date_time PRIVATE _boost_context)
+
+    # thread
+
+    set (SRCS_THREAD
+            ${LIBRARY_DIR}/libs/thread/src/pthread/once.cpp
+            ${LIBRARY_DIR}/libs/thread/src/pthread/once_atomic.cpp
+            ${LIBRARY_DIR}/libs/thread/src/pthread/thread.cpp
+            ${LIBRARY_DIR}/libs/thread/src/future.cpp
+            ${LIBRARY_DIR}/libs/thread/src/tss_null.cpp
+            )
+    add_library (_boost_thread ${SRCS_THREAD})
+    add_library (boost::thread ALIAS _boost_thread)
+    target_include_directories (_boost_thread PRIVATE ${LIBRARY_DIR})
+    target_link_libraries(_boost_thread PRIVATE _boost_context _boost_date_time)
 endif ()

@@ -19,6 +19,11 @@ public:
     ASTPtr comment;
     ASTPtr codec;
     ASTPtr ttl;
+    std::optional<bool> store_modifier;
+    std::optional<bool> index_modifier;
+    std::optional<bool> termvector_modifier;
+    ASTPtr analyzer;
+    ASTPtr search_analyzer;
 
     String getID(char delim) const override { return "ColumnDeclaration" + (delim + name); }
 

@@ -20,6 +20,7 @@ PEERDIR(
     clickhouse/src/Functions
     clickhouse/src/Interpreters
     clickhouse/src/IO
+    clickhouse/src/LuceneAnalyzer
     clickhouse/src/Parsers
     clickhouse/src/Processors
     clickhouse/src/Server

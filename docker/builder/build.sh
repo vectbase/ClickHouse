@@ -1,9 +1,6 @@
 #!/usr/bin/env bash
 set -e
 
-cd /server/contrib/tantivysearch
-~/.cargo/bin/cargo build --release
-
 #ccache -s # uncomment to display CCache statistics
 mkdir -p /server/build_docker
 cd /server/build_docker

@@ -18,14 +18,14 @@ namespace ErrorCodes
 namespace
 {
 
-class FunctionTantivy : public IFunction
+class FunctionLucene : public IFunction
 {
 public:
-    static constexpr auto name = "tantivy";
+    static constexpr auto name = "lucene";
 
     static FunctionPtr create(const Context &)
     {
-        return std::make_shared<FunctionTantivy>();
+        return std::make_shared<FunctionLucene>();
     }
 
     std::string getName() const override
@@ -107,9 +107,9 @@ public:
 
 }
 
-void registerFunctionTantivy(FunctionFactory & factory)
+void registerFunctionLucene(FunctionFactory & factory)
 {
-    factory.registerFunction<FunctionTantivy>();
+    factory.registerFunction<FunctionLucene>();
 }
 
 }

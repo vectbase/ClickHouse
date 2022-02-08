@@ -35,7 +35,7 @@ void registerFunctionNormalizedQueryHash(FunctionFactory &);
 void registerFunctionCountMatches(FunctionFactory &);
 void registerFunctionEncodeXMLComponent(FunctionFactory &);
 void registerFunctionDecodeXMLComponent(FunctionFactory &);
-void registerFunctionTantivy(FunctionFactory &);
+void registerFunctionLucene(FunctionFactory &);
 void registerFunctionExtractTextFromHTML(FunctionFactory &);
 
 
@@ -75,7 +75,7 @@ void registerFunctionsString(FunctionFactory & factory)
     registerFunctionCountMatches(factory);
     registerFunctionEncodeXMLComponent(factory);
     registerFunctionDecodeXMLComponent(factory);
-    registerFunctionTantivy(factory);
+    registerFunctionLucene(factory);
     registerFunctionExtractTextFromHTML(factory);
 #if USE_BASE64
     registerFunctionBase64Encode(factory);

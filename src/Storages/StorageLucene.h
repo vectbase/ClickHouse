@@ -9,9 +9,11 @@
 #include <Core/NamesAndTypes.h>
 #include <Storages/IStorage.h>
 #include <DataStreams/IBlockOutputStream.h>
-#include <tantivysearch.h>
 #include <common/logger_useful.h>
 
+#include <lucene++/LuceneHeaders.h>
+#include <lucene++/FileUtils.h>
+#include <lucene++/MiscUtils.h>
 
 namespace DB
 {
@@ -21,14 +23,14 @@ namespace DB
   * It does not support keys.
   * Data is stored as a set of blocks and is not stored anywhere else.
   */
-class StorageTantivy final : public ext::shared_ptr_helper<StorageTantivy>, public IStorage
+class StorageLucene final : public ext::shared_ptr_helper<StorageLucene>, public IStorage
 {
 
-friend struct ext::shared_ptr_helper<StorageTantivy>;
-friend class TantivyBlockOutputStream;
+friend struct ext::shared_ptr_helper<StorageLucene>;
+friend class LuceneBlockOutputStream;
 
 public:
-    String getName() const override { return "Tantivy"; }
+    String getName() const override { return "Lucene"; }
 
     size_t getSize() const { return data.size(); }
 
@@ -45,8 +47,8 @@ public:
         size_t max_block_size,
         unsigned num_streams) override;
 
-    void startup() override;
-    void shutdown() override;
+//    void startup() override;
+//    void shutdown() override;
 
     bool supportsParallelInsert() const override { return false; }
 
@@ -67,25 +69,38 @@ public:
         const Context & context,
         TableExclusiveLockHolder &) override;
 
-    void drop() override;
+//    void drop() override;
 
     bool supportsSampling() const override { return false; }
 
     std::optional<UInt64> totalRows(const Settings &) const override;
     std::optional<UInt64> totalBytes(const Settings &) const override;
 
+    struct CommonArguments
+    {
+        StorageID table_id;
+        const ColumnsDescription & columns;
+        const ConstraintsDescription & constraints;
+        const Context & context;
+    };
+
 private:
+    String base_path;
     /// The data itself. `list` - so that when inserted to the end, the existing iterators are not invalidated.
     BlocksList data;
     String index_path;
     mutable std::mutex mutex;
-    TantivySearchIndexRW *tantivy_index = nullptr;
+//    Lucene::IndexReaderPtr reader;
+//    Lucene::IndexWriterPtr writer;
     std::atomic<size_t> total_size_bytes = 0;
     std::atomic<size_t> total_size_rows = 0;
     Poco::Logger * log;
 
 protected:
-    StorageTantivy(const StorageID & table_id_, ColumnsDescription columns_description_, ConstraintsDescription constraints_, const String & index_path_);
+    StorageLucene(const std::string & relative_table_dir_path, CommonArguments args);
+
+private:
+    explicit StorageLucene(CommonArguments args);
 };
 
 }

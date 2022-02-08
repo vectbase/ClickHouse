@@ -125,10 +125,22 @@ bool IParserColumnDeclaration<NameParser>::parseImpl(Pos & pos, ASTPtr & node, E
     ParserKeyword s_comment{"COMMENT"};
     ParserKeyword s_codec{"CODEC"};
     ParserKeyword s_ttl{"TTL"};
+    ParserKeyword s_store{"STORE"};
+    ParserKeyword s_not_store{"NOT_STORE"};
+    ParserKeyword s_index{"INDEX"};
+    ParserKeyword s_not_index{"NOT_INDEX"};
+    ParserKeyword s_termvector{"TERMVECTOR"};
+    ParserKeyword s_not_termvector{"NOT_TERMVECTOR"};
+    ParserKeyword s_analyzer{"ANALYZER"};
+    ParserKeyword s_search_analyzer{"SEARCH_ANALYZER"};
     ParserKeyword s_remove{"REMOVE"};
     ParserTernaryOperatorExpression expr_parser;
     ParserStringLiteral string_literal_parser;
     ParserCodec codec_parser;
+    // ParserAnalyzer analyzer_parser{"ANALYZER"};
+    // ParserAnalyzer search_analyzer_parser{"SEARCH_ANALYZER"};
+    ParserAnalyzer analyzer_parser{s_analyzer.getName()};
+    ParserAnalyzer search_analyzer_parser{s_search_analyzer.getName()};
     ParserExpression expression_parser;
 
     /// mandatory column name
@@ -164,6 +176,11 @@ bool IParserColumnDeclaration<NameParser>::parseImpl(Pos & pos, ASTPtr & node, E
     ASTPtr comment_expression;
     ASTPtr codec_expression;
     ASTPtr ttl_expression;
+    std::optional<bool> store_modifier;
+    std::optional<bool> index_modifier;
+    std::optional<bool> termvector_modifier;
+    ASTPtr analyzer_expression;
+    ASTPtr search_analyzer_expression;
 
     if (!s_default.checkWithoutMoving(pos, expected)
         && !s_materialized.checkWithoutMoving(pos, expected)
@@ -220,6 +237,57 @@ bool IParserColumnDeclaration<NameParser>::parseImpl(Pos & pos, ASTPtr & node, E
             return false;
     }
 
+    if (s_store.ignore(pos, expected))
+    {
+        store_modifier.emplace(true);
+    }
+    if (s_not_store.ignore(pos, expected))
+    {
+        if (store_modifier)
+        {
+            return false;
+        }
+        store_modifier.emplace(false);
+    }
+
+    if (s_index.ignore(pos, expected))
+    {
+        index_modifier.emplace(true);
+    }
+    if (s_not_index.ignore(pos, expected))
+    {
+        if (index_modifier)
+        {
+            return false;
+        }
+        index_modifier.emplace(false);
+    }
+
+    if (s_termvector.ignore(pos, expected))
+    {
+        termvector_modifier.emplace(true);
+    }
+    if (s_not_termvector.ignore(pos, expected))
+    {
+        if (termvector_modifier)
+        {
+            return false;
+        }
+        termvector_modifier.emplace(false);
+    }
+
+    if (s_analyzer.ignore(pos, expected))
+    {
+        if (!analyzer_parser.parse(pos, analyzer_expression, expected))
+            return false;
+    }
+
+    if (s_search_analyzer.ignore(pos, expected))
+    {
+        if (!search_analyzer_parser.parse(pos, search_analyzer_expression, expected))
+            return false;
+    }
+
     node = column_declaration;
 
     if (type)
@@ -253,6 +321,22 @@ bool IParserColumnDeclaration<NameParser>::parseImpl(Pos & pos, ASTPtr & node, E
     {
         column_declaration->ttl = ttl_expression;
         column_declaration->children.push_back(std::move(ttl_expression));
+    }
+
+    column_declaration->store_modifier = store_modifier;
+    column_declaration->index_modifier = index_modifier;
+    column_declaration->termvector_modifier = termvector_modifier;
+
+    if (analyzer_expression)
+    {
+        column_declaration->analyzer = analyzer_expression;
+        column_declaration->children.push_back(std::move(analyzer_expression));
+    }
+
+    if (search_analyzer_expression)
+    {
+        column_declaration->search_analyzer = search_analyzer_expression;
+        column_declaration->children.push_back(std::move(search_analyzer_expression));
     }
 
     return true;

@@ -54,6 +54,7 @@
 #include <Dictionaries/getDictionaryConfigurationFromAST.h>
 
 #include <Compression/CompressionFactory.h>
+#include <LuceneAnalyzer/AnalyzerFactory.h>
 
 #include <Interpreters/InterpreterDropQuery.h>
 #include <Interpreters/QueryLog.h>
@@ -333,6 +334,21 @@ ASTPtr InterpreterCreateQuery::formatColumns(const ColumnsDescription & columns)
         if (column.ttl)
             column_declaration->ttl = column.ttl;
 
+        if (column.store_modifier)
+            column_declaration->store_modifier = column.store_modifier;
+
+        if (column.index_modifier)
+            column_declaration->index_modifier = column.index_modifier;
+
+        if (column.termvector_modifier)
+            column_declaration->termvector_modifier = column.termvector_modifier;
+
+        if (column.analyzer)
+            column_declaration->analyzer=column.analyzer;
+
+        if (column.search_analyzer)
+            column_declaration->search_analyzer=column.search_analyzer;
+
         columns_list->children.push_back(column_declaration_ptr);
     }
 
@@ -473,6 +489,30 @@ ColumnsDescription InterpreterCreateQuery::getColumnsDescription(
 
         if (col_decl.ttl)
             column.ttl = col_decl.ttl;
+
+        if (col_decl.store_modifier) 
+            column.store_modifier = col_decl.store_modifier;
+
+        if (col_decl.index_modifier) 
+            column.index_modifier = col_decl.index_modifier;
+
+        if (col_decl.store_modifier) 
+            column.termvector_modifier = col_decl.termvector_modifier;
+
+        if (col_decl.analyzer)
+        {
+            auto& name = col_decl.analyzer->children[0]->children[0]->as<ASTFunction>()->name;
+            AnalyzerFactory::instance().validate(name);
+
+            column.analyzer = col_decl.analyzer;
+        }
+
+        if (col_decl.search_analyzer)
+        {
+            auto& name = col_decl.search_analyzer->children[0]->children[0]->as<ASTFunction>()->name;
+            AnalyzerFactory::instance().validate(name);
+            column.search_analyzer = col_decl.search_analyzer;
+        }
 
         res.add(std::move(column));
     }

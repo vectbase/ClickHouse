@@ -26,7 +26,7 @@ void registerStorageJoin(StorageFactory & factory);
 void registerStorageView(StorageFactory & factory);
 void registerStorageMaterializedView(StorageFactory & factory);
 void registerStorageLiveView(StorageFactory & factory);
-void registerStorageTantivy(StorageFactory & factory);
+void registerStorageLucene(StorageFactory & factory);
 void registerStorageGenerateRandom(StorageFactory & factory);
 
 #if USE_AWS_S3
@@ -84,7 +84,7 @@ void registerStorages()
     registerStorageView(factory);
     registerStorageMaterializedView(factory);
     registerStorageLiveView(factory);
-    registerStorageTantivy(factory);
+    registerStorageLucene(factory);
     registerStorageGenerateRandom(factory);
 
     #if USE_AWS_S3
