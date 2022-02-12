@@ -22,7 +22,7 @@ public:
     KeeperStateMachine(
         ResponsesQueue & responses_queue_, SnapshotsQueue & snapshots_queue_,
         const std::string & snapshots_path_, const CoordinationSettingsPtr & coordination_settings_,
-        const std::string & superdigest_ = "");
+        const std::string & superdigest_ = "", const std::string & rocksdbpath_ = "", int isuse_rocksdb_ = 0);
 
     /// Read state from the latest snapshot
     void init();
@@ -125,6 +125,8 @@ private:
 
     /// Special part of ACL system -- superdigest specified in server config.
     const std::string superdigest;
+    const std::string rocksdbpath;
+    int isuse_rocksdb;
 };
 
 }

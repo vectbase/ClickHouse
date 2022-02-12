@@ -108,7 +108,7 @@ int64_t deserializeStorageData(KeeperStorage & storage, ReadBuffer & in, Poco::L
     size_t count = 0;
     while (path != "/")
     {
-        KeeperStorage::Node node{};
+        KeeperStorageNode node{};
         Coordination::read(node.data, in);
         Coordination::read(node.acl_id, in);
 
@@ -143,14 +143,25 @@ int64_t deserializeStorageData(KeeperStorage & storage, ReadBuffer & in, Poco::L
             LOG_INFO(log, "Deserialized nodes from snapshot: {}", count);
     }
 
-    for (const auto & itr : storage.container)
+    std::vector<std::string> vecKey;
+    storage.container.rocksdbIter(vecKey);
+    for (const auto & itr : vecKey)
     {
-        if (itr.key != "/")
+        if (itr != "/")
         {
-            auto parent_path = parentPath(itr.key);
-            storage.container.updateValue(parent_path, [&path = itr.key] (KeeperStorage::Node & value) { value.children.insert(getBaseName(path)); value.stat.numChildren++; });
+            auto parent_path = parentPath(itr);
+            storage.container.updateValue(parent_path, [&path = itr] (KeeperStorageNode & value) { value.children.insert(getBaseName(path)); value.stat.numChildren++;});
         }
     }
+
+    // for (const auto & itr : storage.container)
+    // {
+    //     if (itr.key != "/")
+    //     {
+    //         auto parent_path = parentPath(itr.key);
+    //         storage.container.updateValue(parent_path, [&path = itr.key] (KeeperStorageNode & value) { value.children.insert(getBaseName(path)); value.stat.numChildren++; });
+    //     }
+    // }
 
     return max_zxid;
 }

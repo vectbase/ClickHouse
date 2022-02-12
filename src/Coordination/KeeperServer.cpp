@@ -90,6 +90,24 @@ std::string checkAndGetSuperdigest(const Poco::Util::AbstractConfiguration & con
     return user_and_digest;
 }
 
+int getIsUseRocksdbFromConfig(const Poco::Util::AbstractConfiguration & config)
+{
+    if (!config.has("keeper_server.rocksdb_isuse"))
+        return 0;
+    return config.getInt("keeper_server.rocksdb_isuse");
+}
+
+std::string getRocksdbPathFromConfig(const Poco::Util::AbstractConfiguration & config, bool standalone_keeper)
+{
+    if (config.has("keeper_server.keeper_rocksdb_path"))
+        return config.getString("keeper_server.keeper_rocksdb_path");
+
+    if (standalone_keeper)
+        return std::filesystem::path{config.getString("path", KEEPER_DEFAULT_PATH)} / "rocksdb";
+    else
+        return std::filesystem::path{config.getString("path", DBMS_DEFAULT_PATH)} / "rocksdb";
+}
+
 }
 
 KeeperServer::KeeperServer(
@@ -105,7 +123,9 @@ KeeperServer::KeeperServer(
                         responses_queue_, snapshots_queue_,
                         getSnapshotsPathFromConfig(config, standalone_keeper),
                         coordination_settings,
-                        checkAndGetSuperdigest(config)))
+                        checkAndGetSuperdigest(config),
+                        getRocksdbPathFromConfig(config, standalone_keeper),
+                        getIsUseRocksdbFromConfig(config)))
     , state_manager(nuraft::cs_new<KeeperStateManager>(server_id, "keeper_server", config, coordination_settings, standalone_keeper))
     , log(&Poco::Logger::get("KeeperServer"))
 {

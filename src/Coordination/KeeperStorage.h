@@ -7,6 +7,7 @@
 #include <Coordination/SessionExpiryQueue.h>
 #include <Coordination/ACLMap.h>
 #include <Coordination/SnapshotableHashTable.h>
+#include <Coordination/SnapshotableRocksdbInfo.h>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -22,6 +23,7 @@ using ChildrenSet = std::unordered_set<std::string>;
 using SessionAndTimeout = std::unordered_map<int64_t, int64_t>;
 
 struct KeeperStorageSnapshot;
+struct KeeperStorageNode;
 
 /// Keeper state machine almost equal to the ZooKeeper's state machine.
 /// Implements all logic of operations, data changes, sessions allocation.
@@ -30,16 +32,6 @@ class KeeperStorage
 {
 public:
     int64_t session_id_counter{1};
-
-    struct Node
-    {
-        String data;
-        uint64_t acl_id = 0; /// 0 -- no ACL by default
-        bool is_sequental = false;
-        Coordination::Stat stat{};
-        int32_t seq_num = 0;
-        ChildrenSet children{};
-    };
 
     struct ResponseForSession
     {
@@ -68,7 +60,7 @@ public:
 
     using RequestsForSessions = std::vector<RequestForSession>;
 
-    using Container = SnapshotableHashTable<Node>;
+    using Container = SnapshotableRocksdbInfo;//SnapshotableHashTable<DB::KeeperStorageNode>;
     using Ephemerals = std::unordered_map<int64_t, std::unordered_set<std::string>>;
     using SessionAndWatcher = std::unordered_map<int64_t, std::unordered_set<std::string>>;
     using SessionIDs = std::vector<int64_t>;
@@ -114,9 +106,11 @@ public:
     }
 
     const String superdigest;
+    const String rocksdbpath;
+    int isuse_rocksdb;
 
 public:
-    KeeperStorage(int64_t tick_time_ms, const String & superdigest_);
+    KeeperStorage(int64_t tick_time_ms, const String & superdigest_, const std::string & rocksdbpath_ = "", int isuse_rocksdb_ = 0);
 
     /// Allocate new session id with the specified timeouts
     int64_t getSessionID(int64_t session_timeout_ms)

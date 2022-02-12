@@ -45,24 +45,28 @@ KeeperStateMachine::KeeperStateMachine(
         SnapshotsQueue & snapshots_queue_,
         const std::string & snapshots_path_,
         const CoordinationSettingsPtr & coordination_settings_,
-        const std::string & superdigest_)
+        const std::string & superdigest_,
+        const std::string & rocksdbpath_,
+        int isuse_rocksdb_)
     : coordination_settings(coordination_settings_)
     , snapshot_manager(
         snapshots_path_, coordination_settings->snapshots_to_keep,
         coordination_settings->compress_snapshots_with_zstd_format, superdigest_,
-        coordination_settings->dead_session_check_period_ms.totalMicroseconds())
+        coordination_settings->dead_session_check_period_ms.totalMicroseconds(), rocksdbpath_, isuse_rocksdb_)
     , responses_queue(responses_queue_)
     , snapshots_queue(snapshots_queue_)
     , last_committed_idx(0)
     , log(&Poco::Logger::get("KeeperStateMachine"))
     , superdigest(superdigest_)
+    , rocksdbpath(rocksdbpath_)
+    , isuse_rocksdb(isuse_rocksdb_)
 {
 }
 
 void KeeperStateMachine::init()
 {
     /// Do everything without mutexes, no other threads exist.
-    LOG_DEBUG(log, "Totally have {} snapshots", snapshot_manager.totalSnapshots());
+    LOG_DEBUG(log, "Totally have {} snapshots.rocksdbpath{} .isuse rocksdb={}", snapshot_manager.totalSnapshots(), rocksdbpath, isuse_rocksdb);
     bool loaded = false;
     bool has_snapshots = snapshot_manager.totalSnapshots() != 0;
     /// Deserialize latest snapshot from disk
@@ -102,7 +106,7 @@ void KeeperStateMachine::init()
     }
 
     if (!storage)
-        storage = std::make_unique<KeeperStorage>(coordination_settings->dead_session_check_period_ms.totalMilliseconds(), superdigest);
+        storage = std::make_unique<KeeperStorage>(coordination_settings->dead_session_check_period_ms.totalMilliseconds(), superdigest, rocksdbpath, isuse_rocksdb);
 }
 
 nuraft::ptr<nuraft::buffer> KeeperStateMachine::commit(const uint64_t log_idx, nuraft::buffer & data)

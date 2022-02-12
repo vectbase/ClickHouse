@@ -132,6 +132,7 @@ public:
         auto map_it = map.find(key);
         if (map_it != map.end())
             return map_it->second;
+
         return list.end();
     }
 
